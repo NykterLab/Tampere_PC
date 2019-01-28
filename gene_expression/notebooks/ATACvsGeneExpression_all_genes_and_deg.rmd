@@ -1,0 +1,506 @@
+---
+title: 'Tampere PC: Differentially expressed genes vs ATAC signal correlation'
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+author: "Francesco Tabaro"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true  
+    df_print: tibble
+    fig_caption: true
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    fig_caption: true
+    df_print: paged
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir="/bmt-data/genomics//projects//atac_workdir/")
+```
+
+```{r, include=FALSE, echo=FALSE}
+library(data.table)
+library(DESeq2)
+library(gridExtra)
+library(matrixStats)
+library(ggplot2)
+```
+
+# Load data
+
+## Annotation
+
+```{r}
+source("R/getAnnotationTable.R")
+ann <- getAnnotationTable()
+```
+
+## RNA
+
+```{r}
+load("R_data/RNAdds.RData")
+load("R_data/RNA_differentiallyExpressed.RData")
+```
+
+## ATAC
+
+```{r, cache=TRUE, eval=FALSE}
+DAR_MAT_PATH <- "dar/RCmat_mor_normed/turp_corrected.tsv.gz"
+dar_rc_mat_norm <- fread(cmd = sprintf("zcat %s", DAR_MAT_PATH), sep ="\t", header = TRUE, showProgress = FALSE)
+names(dar_rc_mat_norm)[1] <- "chrom"
+names(dar_rc_mat_norm) <- gsub(pattern = "^(?:TURP|RP)_(.*)", replacement="\\1", x = names(dar_rc_mat_norm))
+dar_rc_mat_norm[,dar_id := paste(chrom, start, end, sep = "_")]
+cols2keep <- !names(dar_rc_mat_norm) %in% c("chrom", "start", "end")
+dar_rc_mat_norm <- dar_rc_mat_norm[, ..cols2keep]
+```
+
+```{r}
+DAR_MAT_PATH    <- "tss_grid/RCmat/RCmat_bg_corrected_mor_normed_sampwise_normed_turp_corrected.tsv.gz"
+rc_mat_norm     <- fread(cmd = sprintf("zcat %s", DAR_MAT_PATH), sep ="\t", header = TRUE, showProgress = FALSE)
+prom_gid        <- fread("tss_grid/all_genes_500u500d_sorted.bed")
+names(prom_gid) <- c("chrom", "start", "end", "gid", "score", "strand")
+dar_rc_mat_norm     <- merge(prom_gid, rc_mat_norm, by=c("chrom", "start", "end"), all.x=TRUE)
+dar_rc_mat_norm[,`:=`(score=NULL,strand=NULL)]
+setkey(dar_rc_mat_norm, gid)
+
+# dar_rc_mat_norm[,`:=`(dar_id=paste(chrom, start, end, sep="_"))]
+# setkey(dar_rc_mat_norm, dar_id)
+```
+
+
+## Find common set of samples
+
+```{r}
+columns <- intersect(names(dar_rc_mat_norm), colnames(rna_dds))
+
+shared.samples <- list(bph = columns[grep("^BPH",columns)],
+                       pc = columns[grep("^PC",columns)],
+                       crpc = columns[grep("^CRPC",columns)])
+
+atac.samples <- list(bph = names(dar_rc_mat_norm)[grepl("^BPH",names(dar_rc_mat_norm))], 
+                     pc = names(dar_rc_mat_norm)[grepl("^PC",names(dar_rc_mat_norm))], 
+                     crpc = names(dar_rc_mat_norm)[grepl("^CRPC",names(dar_rc_mat_norm))])
+
+rna.samples <- list(bph = colnames(rna_dds)[grepl("^BPH",colnames(rna_dds))], 
+                     pc = colnames(rna_dds)[grepl("^PC",colnames(rna_dds))], 
+                     crpc = colnames(rna_dds)[grepl("^CRPC",colnames(rna_dds))])
+```
+
+<!--
+# Find windows upstream of a gene
+
+```{r}
+findClosestWindowsId <- function (ensgid) {
+  # retrieve atac window id from tss of ensembl gene id
+  # uses rna_dds
+  gr <- granges(rowRanges(rna_dds[ensgid,]))
+  stopifnot(length(gr) == 1)
+  # strand <- ifelse(strand(gr) == "-", -1,1)
+  wsize <- 500 
+  # wstart <- ifelse(strand == 1, start(gr) - (start(gr) %% 250), start(gr) + (250 - (start(gr) %% 250)))
+  startgr <- ifelse(strand(gr) == "-", end(gr), start(gr))
+  wstart <- startgr - (startgr %% 250)
+  wend <- wstart + wsize
+  paste(seqnames(gr), 
+        c(wstart - wsize, wstart), 
+        c(wend - wsize, wend),sep="_")
+}
+
+getWindows <- function (winid) {
+  windows <- dar_rc_mat_norm[dar_id %in% winid,]
+  rn <- windows[["dar_id"]]
+  windows <- as.matrix(windows[,-"dar_id"])
+  rownames(windows) <- rn
+  windows
+}
+```
+-->
+
+# Compute log2 fold change
+
+<!--
+```{r warning=TRUE, eval =FALSE}
+computeLFC <- function (windows, sample.set1, sample.set2) {
+  lfc <- NA
+  dar_id <- NA
+  if(nrow(windows) > 0){
+    lfc <- setNames(rep(NA, nrow(windows)), rownames(windows))
+    for(i in seq(nrow(windows))){
+      lfc[i] <- log2(median(windows[i, sample.set1]) + 1) - log2(median(windows[i, sample.set2]) + 1)
+    }
+    lfc <- lfc[which.max(abs(lfc))]
+    dar_id <- rownames(windows)[which.max(lfc)]
+  } 
+  list(atac=lfc, dar_id=as.character(dar_id))
+}
+```
+-->
+
+```{r}
+computeLFC <- function (rc, sample.set1, sample.set2) {
+  log2(median(rc[sample.set1]) + 1) - log2(median(rc[sample.set2]) + 1)
+}
+```
+
+
+# Compute correlation coefficients
+
+Correlation will be computed between normalized RNA-seq signal of DEG and normalized ATAC-seq signal quantified in proximal promoter region defined from -500bp to +500bp around TSS.
+
+<!--
+```{r}
+computeCor <- function (ensgid, windows, method, samples) {
+  cor <- NA
+  dar_id <- NA
+  if (nrow(windows) > 0){
+    rna_rc <- assay(rna_dds,"norm.counts")[ensgid, match(samples,colnames(rna_dds))]
+    for (i in seq(nrow(windows))){
+      atac_rc <- windows[i, match(samples, colnames(windows))]
+      stopifnot(all(names(atac_rc) == names(rna_rc)))
+      cor[i] <- cor(atac_rc, rna_rc, method=method, use="na.or.complete")
+    }
+    k <- which.max(abs(cor))
+    cor <- cor[k]
+    dar_id <- rownames(windows)[i]
+  }
+  list(cor=cor, dar_id=as.character(dar_id))
+}
+```
+-->
+
+```{r}
+computeCor <- function (ensgid, atac_rc, method, samples) {
+  rna_rc <- assay(rna_dds,"norm.counts")[ensgid, match(samples,colnames(rna_dds))]
+  atac_rc <- atac_rc[match(samples, names(atac_rc))]
+  stopifnot(all(names(atac_rc) == names(rna_rc)))
+  cor(atac_rc, rna_rc, method=method, use="na.or.complete")
+}
+```
+
+```{r}
+getQuadrant <- function (rna_lfc, atac_lfc) {
+  apply(cbind(atac_lfc, rna_lfc),1,function(row){
+    quadrant <- NA
+    if(row[1] >= 0 & row[2] >= 0) {
+      quadrant <- 1
+    } else if (row[1] >= 0 & row[2] < 0) {
+      quadrant <- 2
+    } else if (row[1] < 0 & row[2] < 0) {
+      quadrant <- 3
+    } else if (row[1] < 0 & row[2] >= 0) {
+      quadrant <- 4
+    }
+    return(quadrant)
+  })
+}
+```
+
+## Compute correlation between DEG and TSS signal
+
+```{r warning=TRUE}
+doCor <- function (target, ncores = parallel::detectCores()) {
+  
+  lfc <- vector("list", length = length(target))
+  names(lfc) <- names(target)
+  
+  for (name in names(target)) {
+    
+    x <- target[[name]]
+    
+    de <- x[[1]]
+    geneset <- rownames(de)
+    # geneset <- rowRanges(rna_dds[rownames(de),])
+    s1 <- atac.samples[[tolower(x[[2]][1])]]
+    s2 <- atac.samples[[tolower(x[[2]][2])]]
+    sele_cols <- c(s1,s2)
+    s <- c(shared.samples[[tolower(x[[2]][1])]],
+           shared.samples[[tolower(x[[2]][2])]])
+    
+    res <- mclapply(seq_along(geneset), function (i) {
+      # id                  <- findClosestWindowsId(geneset[i])
+      # windows             <- getWindows(id)
+      
+      gene    <- geneset[i]
+      tss_rc  <- setNames(as.numeric(dar_rc_mat_norm[gid == gene, ..sele_cols]), sele_cols)
+      lfc     <- computeLFC(tss_rc, s1, s2)
+      # names(tmp1)         <- paste0(names(tmp1), "_log2_ratio")
+      pearson  <- computeCor(gene, tss_rc, "pearson", s)
+      spearman <- computeCor(gene, tss_rc, "spearman", s)
+      # tmp                 <- merge(tmp2, tmp3, by=0,suffixes=c("_pearson", "_spearman"))[,-1]
+      # merged              <- cbind(as.data.frame(tmp1), tmp)
+      # merged$all_same_dar <- all(c(merged$dar_id_log2_ratio == merged$dar_id_pearson, 
+      #                              merged$dar_id_log2_ratio == merged$dar_id_spearman, 
+      #                              merged$dar_id_pearson == merged$dar_id_spearman))
+      # merged$candidates   <- paste(id, collapse=";")
+      # rownames(merged)    <- geneset[i]
+      
+      return(data.frame(row.names=gene, 
+                        atac_log2FoldChange=lfc,
+                        pearson=pearson,
+                        spearman=spearman))
+    }, mc.cores = ncores)
+    
+    res <- merge(data.frame(row.names = geneset, 
+                            rna_log2FoldChange=de[,"log2FoldChange"],
+                            rna_padj=de[,"padj"],
+                            rna_abs_med_diff=de[,"diff"]),
+                 do.call(rbind, res), by=0)
+    
+    rownames(res) <- res[,1]
+    res <- res[,-1]
+    
+    toFormat          <- sapply(colnames(res), function(cn) !grepl("padj", cn) & is.numeric(res[,cn]))
+    res[,toFormat]    <- round(res[,toFormat],digits=2)
+    res[,"rna_padj"]  <- round(res[,"rna_padj"], digits=6)
+    res[,"quadrant"]  <- getQuadrant(res$rna_log2FoldChange, res$atac_log2FoldChange)
+    
+    lfc[[name]] <- res
+  }
+  return(lfc)
+}
+
+```
+
+
+```{r}
+
+##################################################
+## IF RSTUDIO HANGS RUN THIS AS SEPARATE SCRIPT ##
+##################################################
+
+contrast_PCvBPH <- c("PC", "BPH")
+contrast_CRPCvPC <- c("CRPC", "PC")
+# contrast_CRPCvBPH <- c("CRPC", "BPH")
+
+# target <- list(PCvBPH   = list(de_PCvBPH,   contrast_PCvBPH),
+#                CRPCvPC  = list(de_CRPCvPC,  contrast_CRPCvPC),
+#                CRPCvBPH = list(de_CRPCvBPH, contrast_CRPCvBPH))
+
+target <- list(PCvBPH   = list(de_PCvBPH,   contrast_PCvBPH),
+               CRPCvPC  = list(de_CRPCvPC,  contrast_CRPCvPC))
+
+lfc <- doCor(target)
+str(lfc)
+```
+
+### Count how many lfc are zero
+
+```{r}
+# op <- par()
+# par(mfrow=c(2,2))
+for (i in seq_along(lfc)) {
+  
+  cat(names(lfc)[i], "\n")
+  
+  sumatac <- sum(lfc[[i]][,"atac_log2FoldChange"] == 0)
+  sumrna <-  sum(lfc[[i]][,"rna_log2FoldChange"] == 0)
+  
+  cat(sumatac, "/", nrow(lfc[[i]]), "zeros\n")
+  cat(sumrna, "/", nrow(lfc[[i]]), "zeros\n")
+  
+}
+```
+
+### Join with annotation table and dump results
+
+```{r}
+# dar.path <- "dar/turp_corrected_log2ratio_2/"
+ann.gene <- as.data.frame(ann[ann$type == "gene" & ann$gene_id %in% rownames(rna_dds)])
+annotated <- lapply(seq_along(lfc), function(i) {
+  df <- lfc[[i]]
+  df$gene_id <- rownames(df)
+  
+  
+  # contrast <- names(lfc)[i]
+  # fn <- tolower(gsub("([A-Z]+)v([A-Z]+)","dars_\\1_\\2.bed", contrast))
+  
+  merge(df,ann.gene,by="gene_id", all.x = TRUE)
+})
+names(annotated) <- names(lfc)
+```
+
+```{r}
+library(openxlsx)
+output.dir <- "tables/correlation_turp/tss_deg_v3"
+if(!dir.exists(output.dir)) dir.create(output.dir, recursive = TRUE)
+write.xlsx(x = annotated, file = file.path(output.dir, "degDar_correlation.xlsx"))
+# for (i in seq_along(annotated)) {
+  # write.csv(annotated[[i]], file = file.path(output.dir, paste0(names(annotated)[[i]],".csv")), row.names = FALSE)
+# }
+```
+
+### Do log2 fold change scatterplot
+
+```{r}
+
+doScatterplot <- function (lfc, 
+                           output.dir = "pictures//scatterplot_correlation_turp/tss_deg_v3", 
+                           output.file = "plot.pdf", 
+                           main = "ATAC-seq log2 fold change at proximal promoter area (from -500bp to 500bp) vs RNA-seq log2 fold change of DEG") {
+  
+  
+  source("R/doLFCscatterplot.R")
+  
+  if(!dir.exists(output.dir)) dir.create(output.dir)
+  
+  ps <- list()
+  for (n in seq_along(lfc)) {
+    comparison <- names(lfc)[n]
+    
+    df <- lfc[[comparison]][,c("atac_log2FoldChange", "rna_log2FoldChange")]
+    colnames(df) <- c("x", "y")
+    
+    ps[[n]] <- doLFCscatter(df1 = df, 
+                            ptitle1 = sprintf("%s (%d genes)", comparison, nrow(df)), 
+                            return_grob = TRUE, ythr = NULL)
+  }
+  
+  gp          <- get.gpar()
+  gp$fontsize <- 14
+  gp$fontface <- "bold"
+  gp$cex      <- 1.1
+  ggsave(marrangeGrob(grobs = ps, 
+                      nrow = 1, ncol = length(lfc),
+                      top = textGrob(label = main, 
+                                     gp=gp)),
+         filename=file.path(output.dir,output.file), width=15, height=7)
+}
+
+doScatterplot(lfc)
+
+```
+
+### Plot correlation coefficient distributions, count genes per sector and do barplot
+
+```{r}
+doHist <- function(vect, main) {
+  m <- median(vect, na.rm = TRUE)
+  hist(vect, breaks = "fd", main = main, xlab = sprintf("Correlation coefficient - median = %.2f",m), col = "grey90")
+  abline(v=m, lwd = 2, col = "dodgerblue")
+}
+
+doBarplot <- function (vect, main) {
+  t <- table(vect[!is.na(vect)])
+  xlim <- c(0, 1.1*max(t))
+  bplot <- barplot(t, main = main, horiz = TRUE, width = 0.85, xlim = xlim, yaxt="n")
+  text(x = t, y = bplot, label = t, pos = 4, cex = 0.8)
+  axis(2, at = bplot, labels = c("1"="Upper right (1)", "2"="Lower right (2)", "3"="Lower left (3)", "4"="Upper left (4)"), tick=FALSE, las=1, line=-0.5, cex.axis=0.65)
+}
+
+
+library(moments)
+
+op <- par()
+pdf("pictures//scatterplot_correlation_turp/tss_deg_v3/corcoeff_hists.pdf")
+par(mfrow=c(2,2))
+for (i in seq_along(lfc)) {
+  df <- lfc[[i]]
+  comparison <- names(lfc)[i]
+  doHist(df$pearson, sprintf("%s - pearson", comparison))
+  doHist(df$spearman, sprintf("%s - spearman", comparison))
+  
+  print(comparison)
+  cat("Pearson range", range(df$pearson, na.rm = TRUE), "-", 
+      "Skewness:", round(skewness(df$pearson, na.rm = TRUE),2),"-", 
+      "Kurtosis:",round(kurtosis(df$pearson, na.rm = TRUE),2), "-", 
+      "Excess kurtosis:",round(kurtosis(df$pearson, na.rm = TRUE)-3,2), "\n")
+  cat("Spearman range:", range(df$spearman, na.rm = TRUE), "-", 
+      "Skewness:", round(skewness(df$spearman, na.rm = TRUE),2), "-", 
+      "Kurtosis:", round(kurtosis(df$spearman, na.rm = TRUE),2),"-",
+      "Excess kurtosis:", round(kurtosis(df$spearman, na.rm = TRUE)-3,2),"\n")
+  
+}
+dev.off()
+par(op)
+
+
+pdf("pictures//scatterplot_correlation_turp/tss_deg_v3/per_sector_counts.pdf")
+par(mfrow=c(2,1), oma = c(0,0,1,0))
+for (i in seq_along(lfc)) {
+  df <- lfc[[i]]
+  comparison <- names(lfc)[i]
+  doBarplot(df$quadrant, comparison)
+}
+mtext("Number of genes per sector of log2 fold change scatterplot", outer = T, line = 0)
+dev.off()
+par(op)
+```
+
+## Compute correlation correlation coefficients for all genes and their TSS signal
+
+```{r}
+
+##################################################
+## IF RSTUDIO HANGS RUN THIS AS SEPARATE SCRIPT ##
+##################################################
+
+target <- list(PCvBPH   = list(rna_PCvBPH,   contrast_PCvBPH),
+               CRPCvPC  = list(rna_CRPCvPC,  contrast_CRPCvPC))
+
+lfc_bg <- doCor(target)
+str(lfc_bg)
+```
+
+### Do log2 fold change scatterplot
+
+```{r}
+
+# doScatterplot(lfc_bg, 
+#               output.file = , 
+#               main = )
+
+ps <- list()
+for (n in seq_along(lfc_bg)) {
+  comparison <- names(lfc_bg)[n]
+  
+  df <- lfc_bg[[comparison]][,c("atac_log2FoldChange", "rna_log2FoldChange")]
+  colnames(df) <- c("x", "y")
+  df$type <- "bg"
+  df[rownames(df) %in% rownames(lfc[[n]]), "type"] <- "de"
+  
+  
+  alpha <- rep(0.1, nrow(df))
+  alpha[df$type == "de"] <- 1
+  ps[[n]] <- doLFCscatter(df1 = df,
+                          ptitle1 = sprintf("%s (%d genes)", comparison, nrow(df)),
+                          return_grob = TRUE, ythr = NULL, colors = c("grey70", "red"), 
+                          palpha = alpha, legend_title = "", bilayer = TRUE)
+}
+
+gp          <- get.gpar()
+gp$fontsize <- 14
+gp$fontface <- "bold"
+gp$cex      <- 1.1
+ggsave(marrangeGrob(grobs = ps,
+                    nrow = 1, ncol = length(lfc),
+                    top = textGrob(label = "ATAC-seq log2 fold change at proximal promoter area (from -500bp to 500bp) vs RNA-seq log2 fold change",
+                                   gp=gp)),
+       filename=file.path(output.dir,"plot_bg.pdf"), width=15, height=7)
+```
+
+### Do barplot of bg
+
+```{r}
+pdf("pictures//scatterplot_correlation_turp/tss_deg_v3/per_sector_counts_bg.pdf")
+par(mfrow=c(2,1), oma = c(0,0,1,0))
+for (i in seq_along(lfc_bg)) {
+  df <- lfc_bg[[i]]
+  comparison <- names(lfc_bg)[i]
+  doBarplot(df$quadrant, comparison)
+}
+mtext("Number of genes per sector of log2 fold change scatterplot", outer = T, line = 0)
+dev.off()
+par(op)
+```
+
+
+
+
+
+
