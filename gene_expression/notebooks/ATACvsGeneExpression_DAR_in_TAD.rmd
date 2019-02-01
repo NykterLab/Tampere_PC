@@ -1,0 +1,496 @@
+---
+title: 'Tampere PC: Differentially accessible regions vs all genes withtin transcriptionally associated domains expression correlation'
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+author: "Francesco Tabaro"
+output:
+  pdf_document:
+  toc: true
+toc_depth: 2
+number_sections: true  
+df_print: tibble
+fig_caption: true
+html_document:
+  toc: true
+toc_depth: 2
+number_sections: true
+fig_caption: true
+df_print: paged
+toc_float:
+  collapsed: false
+smooth_scroll: false
+---
+
+```{r setup}
+knitr::opts_knit$set(root.dir="/bmt-data/genomics//projects//atac_workdir/")
+
+options("scipen"=100) # force natural notation
+
+library(data.table)
+library(openxlsx)
+library(reshape2)
+library(DESeq2)
+library(rtracklayer)
+
+COR_THR    <- 0.5
+NCORES     <- floor(parallel::detectCores() * 0.8)
+setDTthreads(NCORES)
+```
+
+# Load data
+
+## Ensembl annotation
+
+```{r}
+if(!exists("ann") | !exists("ann.gene")){
+  source("R/getAnnotationTable.R")
+  ann         <- getAnnotationTable()
+  ann.gene.gr <- ann[ann$type == "gene"]
+  ann.gene    <- as.data.frame(ann.gene.gr)
+}
+```
+
+## DAR vs gene expression correlation matrices and distance matrices
+
+For computation method checkout `DARvGEXP_correlation_ALLvALL.R`.
+
+```{r}
+if(!exists("all_mrna_pearson"))   all_mrna_pearson   <- fread("dar/correlation/all_genes/combined_3_comparisons_pearson.tsv");  names(all_mrna_pearson)[1]   <- "dar_id"
+if(!exists("all_mrna_spearman"))  all_mrna_spearman  <- fread("dar/correlation/all_genes/combined_3_comparisons_spearman.tsv"); names(all_mrna_spearman)[1]  <- "dar_id"
+if(!exists("all_mrna_distance"))  all_mrna_distance  <- fread("dar/correlation/all_genes/combined_3_comparisons_distance.tsv"); names(all_mrna_distance)[1]  <- "dar_id"
+
+if(!exists("all_mirna_pearson"))  all_mirna_pearson  <- fread("dar/correlation/all_mirna/combined_3_comparisons_pearson.tsv");  names(all_mirna_pearson)[1]  <- "dar_id"
+if(!exists("all_mirna_spearman")) all_mirna_spearman <- fread("dar/correlation/all_mirna/combined_3_comparisons_spearman.tsv"); names(all_mirna_spearman)[1] <- "dar_id"
+if(!exists("all_mirna_distance")) all_mirna_distance <- fread("dar/correlation/all_mirna/combined_3_comparisons_distance.tsv"); names(all_mirna_distance)[1] <- "dar_id"
+
+if(!exists("all_prot_pearson"))   all_prot_pearson   <- fread("dar/correlation/all_prot/combined_3_comparisons_pearson.tsv");  names(all_prot_pearson)[1]    <- "dar_id"
+if(!exists("all_prot_spearman"))  all_prot_spearman  <- fread("dar/correlation/all_prot/combined_3_comparisons_spearman.tsv"); names(all_prot_spearman)[1]   <- "dar_id"
+
+```
+
+## Generate mappings
+
+```{r}
+if(!exists("mirna_map")) {
+  all_mirna <- Reduce(intersect, list(names(all_mirna_pearson)[-1], names(all_mirna_spearman)[-1], names(all_mirna_distance)[-1]))
+  mirna_map  <- data.table(mirna_name=all_mirna, mirna_id=rep(NA_character_,length(all_mirna)))
+  for(i in seq_along(all_mirna)) {
+    pat <- gsub(pattern = "^hsa-mir-([^-]*).*$", replacement = "mir\\1", x = all_mirna[i], ignore.case = TRUE)
+    idx <- grep(pat, ann.gene$gene_name, ignore.case = TRUE)
+    mirna_map[i, "mirna_id"] <- ifelse(length(idx)>0, ann.gene$gene_id[idx], NA_character_)
+  }
+}
+
+if(!exists("all_prot_map")){       
+  all_prot_map <- fread("tables/swissprotdata_normalized.tsv", select = c("uniprot", "gn"))
+  
+  biomart_map <- fread("tables/uniprot2ensembleGeneID/biomart_missing_uniprot.tsv", select = c(1,2)) # mapping from Biomart (Ensembl 90)
+  names(biomart_map) <- c("uniprot", "ensgid")
+  biomart_map[, ensgid := paste(ensgid, collapse = "|"), by = uniprot]
+  
+  uniprot_map <- fread("tables/uniprot2ensembleGeneID/uniprot_mapping_missed.tsv") # mapping from Uniprot (unknown Ensembl)
+  names(uniprot_map) <- c("uniprot", "ensgid")
+  uniprot_map[, ensgid := paste(ensgid, collapse = "|"), by = uniprot]
+  
+  missing_map <- rbind(biomart_map, uniprot_map)
+  missing_map <- missing_map[!duplicated(missing_map)]
+  missing_map[, ensgid := sapply(ensgid, function(x) ifelse(any(grepl(x, ann.gene$gene_id)), grep(x, ann.gene$gene_id, value = TRUE), ""))]
+  missing_map <- missing_map[ensgid != ""]
+  
+  all_prot_map[, ensgid := ann.gene$gene_id[match(gn, ann.gene$gene_name)]]
+  all_prot_map[match(missing_map$uniprot, uniprot), ensgid := missing_map[match(uniprot, uniprot), ensgid]]
+  
+}
+```
+
+# Compute correlation between DARs and all genes withtin TAD
+
+## Define helper functions
+
+```{r}
+getGenesInTad <- function (tad_id) {
+  gr <- GRanges(seqnames = gsub(pattern = "(chr.*):[0-9]+-[0-9]+", replacement = "\\1", x = tad_id),
+                ranges   = IRanges(start = as.numeric(gsub(pattern = "chr.*:([0-9]+)-[0-9]+", replacement = "\\1", x = tad_id)) + 1,
+                                   end   = as.numeric(gsub(pattern = "chr.*:[0-9]+-([0-9]+)", replacement = "\\1", x = tad_id))),
+                strand   = "*",
+                seqinfo  = seqinfo(ann))
+  gr_in_tad <- subsetByOverlaps(ann.gene.gr, gr)
+  gr_in_tad <- gr_in_tad[gr_in_tad$gene_biotype %in% c("protein_coding", "miRNA")]
+  return(gr_in_tad$gene_id)
+}
+
+import_dars <- function (dars_path) {
+  bed <- fread(dars_path)
+  return(bed[,.(dar_id=paste(chrom,start,end,sep="_"), dar_status=ifelse(log2_ratio > 0, "opening", "closing"))])
+}
+
+subsetDt <- function (dt, dars, selected_col) {
+  ret <- dt[dar_id %in% dars, ..selected_col]
+  ret[!duplicated(ret)]
+}
+
+buildMat <- function (dt_genes, dt_mirna, dars, ensgids, value_name, variable_name = "gene_id") {
+  ensgids <- ensgids[!is.na(ensgids)]
+
+  selected_col <- names(dt_genes)[names(dt_genes) %in% ensgids]
+  selected_col <- c("dar_id", selected_col)
+  mat <- subsetDt(dt_genes, dars, selected_col)
+  
+  if(!is.null(dt_mirna)){
+    if(any(mirna_map[["mirna_id"]] %in% ensgids)){
+      selected_col <- as.character(mirna_map[mirna_id %in% ensgids, mirna_name])
+      selected_col <- c("dar_id", selected_col)
+      
+      mat_mirna <- subsetDt(dt_mirna, dars, selected_col)
+      
+      stopifnot(nrow(mat) == nrow(mat_mirna))
+      mat <- merge(mat, mat_mirna, by = "dar_id")
+      
+    }
+  }
+  
+  melted <- melt(mat,  id.vars = "dar_id", value.name = value_name,  variable.name = variable_name, variable.factor = FALSE)
+  return(melted)
+}
+
+buildMatTss <- function (dt_genes, dt_mirna, ensgids, value_name) {
+  ensgids <- ensgids[!is.na(ensgids)]
+  gr      <- subset(ann, subset = type == "gene" & gene_id %in% ensgids)
+  
+  tss     <- ifelse(strand(gr) == "-", end(gr), start(gr))
+  tss     <- tss - 1 
+  wstart  <- tss - (tss %% 250)
+  wend    <- wstart + 500
+  wid     <- paste(seqnames(gr), wstart, wend, sep = "_")
+  
+  stopifnot(any(wid %in% dt_genes[["dar_id"]] | wid %in% dt_mirna[["dar_id"]]))
+  
+  buildMat(dt_genes, dt_mirna, wid, ensgids, sprintf("%s_tss", value_name))
+}
+
+mergeGtrd <- function (dt) {
+  df <- data.frame(chr   = gsub(pattern = "(chr.*)_[0-9]+_[0-9]+", replacement = "\\1", x = dt[["dar_id"]]),
+                   start = gsub(pattern = "chr.*_([0-9]+)_[0-9]+", replacement = "\\1", x = dt[["dar_id"]]),
+                   end   = gsub(pattern = "chr.*_[0-9]+_([0-9]+)", replacement = "\\1", x = dt[["dar_id"]]),
+                   name  = dt[["dar_id"]])
+  gr    <- makeGRangesFromDataFrame(df, starts.in.df.are.0based = FALSE, keep.extra.columns = TRUE)
+  olaps <- findOverlaps(gtrd, gr, type = "within")
+  tf_df <- data.frame(dar_id = gr$name[subjectHits(olaps)], gtrd_tf = gtrd$name[queryHits(olaps)])
+  tf_df <- aggregate(. ~ dar_id, data = tf_df, FUN = function(x) paste(as.character(unique(tf_df[x, "gtrd_tf"])), collapse = ", "))
+  merge(dt, tf_df, by = "dar_id", all.x = TRUE)
+}
+
+getDarsInTad <- function (tad_id) {
+  
+  tad_column <- if(grepl("lncap", tad_annotated_file, ignore.case = TRUE)) {
+    "TAD.LNCaP"
+  } else if(grepl("esc", tad_annotated_file, ignore.case = TRUE)) {
+    "TAD.H1.ESC"
+  } else {
+    stop("Could not find TAD column name.")
+  }
+  
+  keep <- grepl(tad_id, dar_annotated[,tad_column])
+  dars_in_tad <- dar_annotated[keep, "dar_id"]
+  gsub(pattern = "^(chr.+_[0-9]+_[0-9]+)_.*$", replacement = "\\1", x = dars_in_tad)
+
+}
+
+
+buildDarGenesCorrMatrix <- function (i) {
+  
+  tad_id <- sprintf("%s:%s-%s", tad_annotated[i,"chrom"], tad_annotated[i,"TAD_start"],	tad_annotated[i,"TAD_end"])
+
+  ensgids_in_tad <- getGenesInTad(tad_id)
+  
+  if(length(ensgids_in_tad) > 0) {
+    
+    dars_in_tad <- getDarsInTad(tad_id)
+    
+    
+    if (any(ensgids_in_tad %in% names(all_mrna_distance))){
+      
+      cormat_pearson  <- buildMat(all_mrna_pearson,  all_mirna_pearson,  dars_in_tad, ensgids_in_tad, "pearson")
+      cormat_spearman <- buildMat(all_mrna_spearman, all_mirna_spearman, dars_in_tad, ensgids_in_tad, "spearman")
+      distmat         <- buildMat(all_mrna_distance, all_mirna_distance, dars_in_tad, ensgids_in_tad, "distance")
+      
+      # cormat_pearson_tss <- buildMatTss(all_mrna_pearson, all_mirna_pearson, ensgids_in_tad, "pearson")
+      # cormat_spearman_tss <- buildMatTss(all_mrna_spearman, all_mirna_spearman, ensgids_in_tad, "spearman")
+      
+      stopifnot(all(cormat_pearson[["dar_id"]] == cormat_spearman[["dar_id"]]) & all(cormat_spearman[["dar_id"]] == distmat[["dar_id"]]))
+      
+      m <- Reduce(function (x, y) merge(x, y, by = c("dar_id", "gene_id")), list(cormat_pearson, cormat_spearman, distmat))
+      m[grepl(pattern = "mir", x = gene_id, ignore.case = TRUE), gene_id := mirna_map[mirna_name %in% gene_id, mirna_id]]
+      m[,`:=`(tad_id=tad_id,
+              unique_dars=tad_annotated[i, "total"],
+              ngenes=length(ensgids_in_tad))]
+      
+      m <- subset(m, subset = abs(pearson) > COR_THR | abs(spearman) > COR_THR)
+      
+    }else{
+      m <- data.table()
+    }
+    
+    return(m)
+  }
+}
+
+buildDarProtCorrelationMat <- function (i) {
+  
+  tad_id <- sprintf("%s:%s-%s", tad_annotated[i,"chrom"], tad_annotated[i,"TAD_start"],	tad_annotated[i,"TAD_end"])
+  ensgids_in_tad <- getGenesInTad(tad_id)
+  unp_in_tad     <- all_prot_map[match(ensgids_in_tad, ensgid), uniprot]
+  
+  if (length(unp_in_tad) > 0 & any(!is.na(unp_in_tad))) {
+    
+    dars_in_tad <- getDarsInTad(tad_id)
+    
+    cormat_pearson_prot  <- buildMat(all_prot_pearson,  NULL, dars_in_tad, unp_in_tad, "protein_pearson", "protein_id")
+    cormat_spearman_prot <- buildMat(all_prot_spearman, NULL, dars_in_tad, unp_in_tad, "protein_spearman", "protein_id")
+    pm <- merge(cormat_pearson_prot, cormat_spearman_prot, by = c("dar_id", "protein_id"))
+    
+    stopifnot(nrow(pm) == nrow(cormat_spearman_prot) & nrow(pm) == nrow(cormat_spearman_prot))
+    
+    pm[, `:=`(tad_id = tad_id,
+              gene_id = all_prot_map[match(protein_id, uniprot), ensgid])]
+    pm[, gene_name := ann.gene[match(gene_id, ann.gene$gene_id), "gene_name"]]
+    
+  } else {
+    
+    pm <- data.table()
+    
+  }
+  
+  return(pm)
+}
+
+```
+
+## Do computation
+
+```{r}
+load("R_data/RNA_differentiallyExpressed.RData")
+deg <- list("pc_bph"        = rownames(de_PCvBPH),
+            "crpc_pc"       = rownames(de_CRPCvPC)
+            # "crpc_bph"      = rownames(de_CRPCvBPH),
+            # "2_comparisons" = union(rownames(de_PCvBPH), rownames(de_CRPCvBPH)),
+            # "3_comparisons" = Reduce(union, list(rownames(de_PCvBPH), rownames(de_CRPCvPC), rownames(de_CRPCvBPH)))
+            )
+
+dars_log2ratio <- list("pc_bph"        = import_dars("dar/turp_corrected_log2ratio_2/with_comparison_group_col/dars_pc_bph.bed"),
+                       "crpc_pc"       = import_dars("dar/turp_corrected_log2ratio_2/with_comparison_group_col/dars_crpc_pc.bed")
+                       # "crpc_bph"      = import_dars("dar/turp_corrected_log2ratio_2/with_comparison_group_col/dars_crpc_bph.bed"),
+                       # "2_comparisons" = import_dars("dar/turp_corrected_log2ratio_2/with_comparison_group_col/combined_2_comparisons.bed"),
+                       # "3_comparisons" = import_dars("dar/turp_corrected_log2ratio_2/with_comparison_group_col/combined_3_comparisons.bed")
+                       )
+
+if(!exists("gtrd")) gtrd <- import("/bmt-data/genomics/reference/gtrd/gtrd_meta_clusters_prostate_w_names.bed")
+
+NGENES_TOT <- ncol(all_mrna_pearson) + ncol(all_mirna_pearson)
+
+tad_annotated_files <- c("dar_and_tad/h1_esc/h1_esc_with_dar_info.xlsx",
+                         "dar_and_tad/lncap/lncap_with_dar_info.xlsx")
+
+mapper <- list("pc_bph"        = "PCvBPH",
+               "crpc_pc"       = "CRPCvPC"
+               # "crpc_bph"      = "CRPCvBPH",
+               # "2_comparisons" = "comp2",
+               # "3_comparisons" = "comp3"
+               )
+
+sheet_names <- c("pc_bph", "crpc_pc")
+for (tad_annotated_file in tad_annotated_files) {
+  # sheet_names <- getSheetNames(tad_annotated_file)
+  outsheets   <- list()
+
+  for(sheet_number in seq_along(sheet_names)){
+    sheet_name  <- sheet_names[sheet_number]
+
+    dar_annotated <- read.csv(sprintf("tables/correlation_turp/dar/%s_turp_corrected.csv",mapper[[sheet_name]]),stringsAsFactors = FALSE)
+    tad_annotated <- readWorkbook(xlsxFile = tad_annotated_file, sheet = sheet_number)
+
+    # out <- do.call(rbind, mclapply(seq(nrow(tad_annotated)), buildDarGenesCorrMatrix , mc.cores = NCORES))
+    out <- do.call(rbind, lapply(seq(nrow(tad_annotated)), buildDarGenesCorrMatrix))
+    
+    out <- as.data.table(out)
+    out[, `:=`(gene_name = ann.gene[match(gene_id, ann.gene$gene_id), "gene_name"],
+               de        = gene_id %in% deg[[sheet_name]],
+               pearson   = round(as.numeric(pearson),  digits = 2),
+               spearman  = round(as.numeric(spearman), digits = 2))
+        ]
+    out[,genes := sprintf("%s (pearson: %s, spearman: %s, distance: %s, deg: %s)", gene_name, pearson, spearman, distance, de)]
+    aggregated <- out[,.(number_correlating_genes    = .N,
+                         total_number_genes_in_tad   = ngenes,
+                         percent_correlating_genes   = round(.N / ngenes * 100, digits = 2),
+                         cor_with_gene_expr_pearson  = if(sum(pearson > 0) == sum(pearson < 0)){ "both" } else if (sum(pearson > 0) > sum(pearson < 0)) { "positive" } else { "negative" },
+                         cor_with_gene_expr_spearman = if(sum(spearman > 0) == sum(spearman < 0)){ "both" } else if (sum(spearman > 0) > sum(spearman < 0)) { "positive" } else { "negative" },
+                         # mean_distance               = floor(mean(distance)),
+                         # mean_abs_pearson            = round(mean(abs(pearson)),digits = 2),
+                         # mean_abs_spearman           = round(mean(abs(spearman)),digits = 2),
+                         # max_pearson                 = pearson[which.max(abs(pearson))],
+                         # max_spearman                = spearman[which.max(abs(spearman))],
+                         # ngenes_pos_cor_pearson      = sum(pearson > 0),
+                         # ngenes_neg_cor_pearson      = sum(pearson < 0),
+                         # ngenes_pos_cor_spearman     = sum(spearman > 0),
+                         # ngenes_neg_cor_spearman     = sum(spearman < 0),
+                         genes                       = paste(unique(genes), collapse = "; ")), by=list(tad_id, dar_id)]
+    aggregated <- aggregated[!duplicated(aggregated),]
+    
+    out_prot <- do.call(rbind, mclapply(seq(nrow(tad_annotated)), buildDarProtCorrelationMat, mc.cores = NCORES))
+    out_prot <- as.data.table(out_prot)
+    out_prot[, `:=`(protein_pearson = round(protein_pearson, digits = 2),
+                    protein_spearman = round(protein_spearman, digits = 2))]
+    out_prot[,proteins := sprintf("%s (%s, pearson: %s, spearman: %s)", gene_name, protein_id, protein_pearson, protein_spearman)]
+    
+    # keep protein that show either correlation at miRNA level OR correlate themselves with ATAC
+    out_prot <- out_prot[union(match(out$gene_id, out_prot$gene_id), which(abs(out_prot$protein_pearson) > COR_THR | abs(out_prot$protein_spearman) > COR_THR))]
+    
+    aggregated_prot <- out_prot[,.(proteins = paste(unique(proteins), collapse = "; ")),by=list(tad_id, dar_id)]
+    aggregated_prot <- aggregated_prot[!duplicated(aggregated_prot)]
+
+    aggregated <- merge(aggregated, aggregated_prot, by = c("tad_id", "dar_id"), all.x = TRUE)
+
+    ## Hypergeometric test
+    m <- sum(aggregated[["number_correlating_genes"]]) # total number of correlating genes
+    n <- NGENES_TOT - m                                # total number of non correlating genes
+    k <- out[["ngenes"]]                               # vector of number of genes in tad
+    q <- aggregated[["number_correlating_genes"]]      # vector of number of correlating genes in tad
+
+    stopifnot(m < NGENES_TOT)
+    
+    pv <- simplify2array(mclapply(seq(length(q)), function(ii) phyper(q[ii], m, n, k[ii], lower.tail = FALSE), mc.cores = NCORES))
+    adjpv <- p.adjust(pv, method = "fdr")
+    
+    aggregated[, `:=`(pvalue = ..pv, 
+                      fdr_corrected_pvalue = ..adjpv)]
+    aggregated[, `:=`(enrichment_score = -log10(pvalue), 
+                      fdr_corrected_enrichment_score = -log10(fdr_corrected_pvalue))]
+    aggregated[, `:=`(pvalue = round(pvalue, digits = 6), 
+                      fdr_corrected_pvalue = round(fdr_corrected_pvalue, digits = 6))]
+    aggregated[, `:=`(enrichment_score = round(enrichment_score, digits = 2), 
+                      fdr_corrected_enrichment_score = round(fdr_corrected_enrichment_score, digits = 2))]
+
+    aggregated <- merge(aggregated, dars_log2ratio[[sheet_name]], by = "dar_id")
+    aggregated <- mergeGtrd(aggregated)
+
+    # setcolorder(aggregated, c("tad_id", "dar_id", "dar_status",
+    #                           "number_correlating_genes", "total_number_genes_in_tad", "percent_correlating_genes",
+    #                           "pvalue", "enrichment_score", "fdr_corrected_pvalue", "fdr_corrected_enrichment_score",
+    #                           "cor_with_gene_expr_pearson", "cor_with_gene_expr_spearman",
+    #                           "mean_distance", "mean_abs_pearson", "mean_abs_spearman",
+    #                           "max_pearson", "max_spearman",
+    #                           "ngenes_pos_cor_pearson", "ngenes_neg_cor_pearson",
+    #                           "ngenes_pos_cor_spearman", "ngenes_neg_cor_spearman",
+    #                           "genes", "proteins", "gtrd_tf"))
+    
+    setcolorder(aggregated, c("tad_id", "dar_id", "dar_status",
+                              "number_correlating_genes", "total_number_genes_in_tad", "percent_correlating_genes",
+                              "pvalue", "enrichment_score", "fdr_corrected_pvalue", "fdr_corrected_enrichment_score",
+                              "cor_with_gene_expr_pearson", "cor_with_gene_expr_spearman",
+                              "genes", "proteins", "gtrd_tf"))
+    
+
+    outsheets[[sheet_name]] <- aggregated
+  }
+
+  outpath <- if (grepl("lncap", tad_annotated_file)) {
+    "dar_and_tad/lncap/lncap_tad_dar_gene_correlation.xlsx"
+  } else if (grepl("esc", tad_annotated_file)) {
+    "dar_and_tad/h1_esc/h1_esc_tad_dar_gene_correlation.xlsx"
+  } else {
+    stop("Cannot set output path.")
+  }
+  
+  if(!file.exists(outpath)) write.xlsx(outsheets,file = outpath)
+}
+
+```
+
+# Summarize results
+
+## Define helpers
+```{r}
+getGenes <- function(x, status) {
+  g <- input[grepl(x, gtrd_tf) & dar_status == status, genes]
+  g <- strsplit(g, "; ", fixed = TRUE)
+  g <- mclapply(g, gsub, pattern = "(.*) \\(.*\\)", replacement = "\\1", mc.cores = NCORES)
+  paste(sort(unique(unlist(g))), collapse = ", ")
+}
+
+getDars <- function (x, status) {
+  d <- input[grepl(x, gtrd_tf) & dar_status == status , dar_id]
+  paste(d, collapse = ", ")
+}
+
+getTads <- function (x) {
+  t <- input[grep(x, gtrd_tf), tad_id]
+  paste(unique(t), collapse = ", ")
+}
+
+findGenesUnion <- function (i) {
+  s1 <- unique(unlist(strsplit(out$genes_correlating_with_opening_dars[i], ", ")))
+  s2 <- unique(unlist(strsplit(out$genes_correlating_with_closing_dars[i], ", ")))
+  u <- union(s1, s2)
+  paste(u, collapse = ", ")
+}
+
+countOccurrencies <- function (x) length(unlist(strsplit(x, ", ", fixed = TRUE)))
+```
+
+## Do summarization by TF
+
+A bit inefficient because it is reloading previous results, but this is what happens when gluing together two scripts :)
+
+```{r}
+tad_annotated_files <- c("dar_and_tad/h1_esc/h1_esc_tad_dar_gene_correlation.xlsx",
+                         "dar_and_tad/lncap/lncap_tad_dar_gene_correlation.xlsx")
+
+for (tad_annotated_file in tad_annotated_files) {
+  sheet_names <- getSheetNames(tad_annotated_file)
+  outsheets   <- list()
+
+  for(sheet_number in seq_along(sheet_names)){
+    sheet_name  <- sheet_names[sheet_number]
+
+    input <- readWorkbook(xlsxFile = tad_annotated_file, sheet = sheet_number)
+    input <- as.data.table(input)
+
+    tf <- unlist(strsplit(input$gtrd_tf, split = ", ", fixed = TRUE))
+    tf <- tf[!is.na(tf)]
+    tf <- unique(tf)
+
+    out <- data.table(tf)
+    out[, `:=`(genes_correlating_with_opening_dars = simplify2array(mclapply(tf, getGenes, status = "opening", mc.cores = NCORES)),
+               genes_correlating_with_closing_dars = simplify2array(mclapply(tf, getGenes, status = "closing", mc.cores = NCORES)),
+               opening_dars                        = simplify2array(mclapply(tf, getDars,  status = "opening", mc.cores = NCORES)),
+               closing_dars                        = simplify2array(mclapply(tf, getDars,  status = "closing", mc.cores = NCORES)),
+               tads                                = simplify2array(mclapply(tf, getTads))) ]
+    
+    out[, genes := simplify2array(mclapply(seq(nrow(out)), findGenesUnion, mc.cores = NCORES))]
+    
+    out[, `:=`(ngenes_correlating_with_opening_dars = simplify2array(mclapply(genes_correlating_with_opening_dars, countOccurrencies, mc.cores = NCORES)),
+               ngenes_correlating_with_closing_dars = simplify2array(mclapply(genes_correlating_with_closing_dars, countOccurrencies, mc.cores = NCORES)),
+               ngenes                               = simplify2array(mclapply(genes, countOccurrencies, mc.cores = NCORES)),
+               nopening_dars                        = simplify2array(mclapply(opening_dars,  countOccurrencies, mc.cores = NCORES)),
+               nclosing_dars                        = simplify2array(mclapply(closing_dars,  countOccurrencies, mc.cores = NCORES)),
+               ntads                                = simplify2array(mclapply(tads,  countOccurrencies, mc.cores = NCORES)))]
+    
+    setcolorder(out, c("tf", "genes", "genes_correlating_with_opening_dars", "genes_correlating_with_closing_dars",
+                       "opening_dars", "closing_dars", "tads", 
+                       "ngenes", "ngenes_correlating_with_opening_dars", "ngenes_correlating_with_closing_dars",
+                       "nopening_dars", "nclosing_dars", "ntads"))
+
+    outsheets[[sheet_name]] <- out
+  }
+
+  outpath <- if (grepl("lncap", tad_annotated_file)) {
+    "dar_and_tad/lncap/lncap_tad_dar_gene_by_tf.xlsx"
+  } else if (grepl("esc", tad_annotated_file)) {
+    "dar_and_tad/h1_esc/h1_esc_tad_dar_gene_by_tf.xlsx"
+  } else {
+    stop("Cannot set output path.")
+  }
+
+  if(!file.exists(outpath)) write.xlsx(outsheets,file = outpath)
+
+}
+```

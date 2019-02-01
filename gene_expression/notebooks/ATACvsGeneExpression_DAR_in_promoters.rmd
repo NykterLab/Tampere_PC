@@ -1,0 +1,324 @@
+---
+title: 'Tampere PC: RNA-seq vs ATAC-seq signal correlation in promoter (-1kbp/100bp) area'
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+author: "Francesco Tabaro"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true  
+    df_print: tibble
+    fig_caption: true
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    fig_caption: true
+    df_print: paged
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir="/bmt-data/genomics//projects//atac_workdir/")
+
+library(data.table)
+library(DESeq2)
+library(GenomicAlignments)
+
+NCORES <- parallel::detectCores()
+setDTthreads(NCORES)
+```
+
+# Load data
+
+## RNA-seq
+```{r}
+load("R_data/RNAdds.RData")
+load("R_data/RNA_differentiallyExpressed.RData")
+
+de <- list(PCvBPH=de_PCvBPH, CRPCvPC=de_CRPCvPC)
+rna_lfc <- list(PCvBPH=rna_PCvBPH, CRPCvPC=rna_CRPCvPC)
+```
+
+## Ensembl annotation
+```{r}
+if(!exists("ann") | !exists("ann.gene")){
+  source("R/getAnnotationTable.R")
+  ann         <- getAnnotationTable()
+  ann.gene.gr <- ann[ann$type == "gene"]
+  ann.gene    <- as.data.frame(ann.gene.gr)
+}
+```
+
+## Correlation matrices
+
+RNA-seq (genes), sRNA-seq (miRNA) and SWATH (proteins)
+
+```{r}
+if(!exists("all_mrna_pearson"))   all_mrna_pearson   <- fread("dar/correlation/all_genes/combined_3_comparisons_pearson.tsv");  names(all_mrna_pearson)[1]   <- "dar_id"
+if(!exists("all_mrna_spearman"))  all_mrna_spearman  <- fread("dar/correlation/all_genes/combined_3_comparisons_spearman.tsv"); names(all_mrna_spearman)[1]  <- "dar_id"
+if(!exists("all_mrna_distance"))  all_mrna_distance  <- fread("dar/correlation/all_genes/combined_3_comparisons_distance.tsv"); names(all_mrna_distance)[1]  <- "dar_id"
+
+if(!exists("all_mirna_pearson"))  all_mirna_pearson  <- fread("dar/correlation/all_mirna/combined_3_comparisons_pearson.tsv");  names(all_mirna_pearson)[1]  <- "dar_id"
+if(!exists("all_mirna_spearman")) all_mirna_spearman <- fread("dar/correlation/all_mirna/combined_3_comparisons_spearman.tsv"); names(all_mirna_spearman)[1] <- "dar_id"
+if(!exists("all_mirna_distance")) all_mirna_distance <- fread("dar/correlation/all_mirna/combined_3_comparisons_distance.tsv"); names(all_mirna_distance)[1] <- "dar_id"
+
+if(!exists("all_prot_pearson"))   all_prot_pearson   <- fread("dar/correlation/all_prot/combined_3_comparisons_pearson.tsv");  names(all_prot_pearson)[1]    <- "dar_id"
+if(!exists("all_prot_spearman"))  all_prot_spearman  <- fread("dar/correlation/all_prot/combined_3_comparisons_spearman.tsv"); names(all_prot_spearman)[1]   <- "dar_id"
+```
+
+# Generate mapping tables
+
+## miRNA 
+
+Map mirbase ids to Ensembl gene id
+
+```{r}
+if(!exists("mirna_map")) {
+  all_mirna <- Reduce(intersect, list(names(all_mirna_pearson)[-1], names(all_mirna_spearman)[-1], names(all_mirna_distance)[-1]))
+  mirna_map  <- data.table(mirna_name=all_mirna, mirna_id=rep(NA_character_,length(all_mirna)))
+  for(i in seq_along(all_mirna)) {
+    pat <- gsub(pattern = "^hsa-mir-([^-]*).*$", replacement = "mir\\1", x = all_mirna [i], ignore.case = TRUE)
+    idx <- grep(pat, ann.gene$gene_name, ignore.case = TRUE)
+    mirna_map[i, "mirna_id"] <- ifelse(length(idx)>0, ann.gene$gene_id[idx], NA_character_)
+  }
+}
+```
+
+Map Uniprot id to Ensembl gene id
+
+```{r}
+if(!exists("all_prot_map")){
+  all_prot_map <- fread("tables/swissprotdata_normalized.tsv", select = c("uniprot", "gn"))
+
+  biomart_map <- fread("tables/uniprot2ensembleGeneID/biomart_missing_uniprot.tsv", select = c(1,2)) # mapping from Biomart (Ensembl 90)
+  names(biomart_map) <- c("uniprot", "ensgid")
+  biomart_map[, ensgid := paste(ensgid, collapse = "|"), by = uniprot]
+
+  uniprot_map <- fread("tables/uniprot2ensembleGeneID/uniprot_mapping_missed.tsv") # mapping from Uniprot (unknown Ensembl)
+  names(uniprot_map) <- c("uniprot", "ensgid")
+  uniprot_map[, ensgid := paste(ensgid, collapse = "|"), by = uniprot]
+
+  missing_map <- rbind(biomart_map, uniprot_map)
+  missing_map <- missing_map[!duplicated(missing_map)]
+  missing_map[, ensgid := sapply(ensgid, function(x) ifelse(any(grepl(x, ann.gene$gene_id)), grep(x, ann.gene$gene_id, value = TRUE), ""))]
+  missing_map <- missing_map[ensgid != ""]
+
+  all_prot_map[, ensgid := ann.gene$gene_id[match(gn, ann.gene$gene_name)]]
+  all_prot_map[match(missing_map$uniprot, uniprot), ensgid := missing_map[match(uniprot, uniprot), ensgid]]
+
+}
+```
+
+## Define helpers
+
+```{r}
+import_dars <- function (dars_path) {
+  bed <- fread(dars_path)
+  names(bed)[1] <- "dar_id"
+  bed[,dar_id:=gsub(pattern="(chr.+_[0-9]+_[0-9]+)_.*", replacement = "\\1", x = dar_id)]
+  grbed <- makeGRangesFromDataFrame(as.data.frame(bed), seqnames.field = "Chr", start.field = "start", end.field = "end",
+                                    starts.in.df.are.0based = TRUE, keep.extra.columns = TRUE, ignore.strand = TRUE)
+  return(grbed)
+  # return(bed[,.(dar_id=paste(chrom,start,end,sep="_"), dar_status=ifelse(log2_ratio > 0, "opening", "closing"))])
+}
+
+import_raw_dars <- function (dars_path) {
+  bed <- fread(dars_path)
+  bed[,dar_id:=paste(chrom,start,end,sep="_")]
+  # names(bed)[1] <- "dar_id"
+  # bed[,dar_id:=gsub(pattern="(chr.+_[0-9]+_[0-9]+)_.*", replacement = "\\1", x = dar_id)]
+  # grbed <- makeGRangesFromDataFrame(as.data.frame(bed), seqnames.field = "chrom", start.field = "start", end.field = "end",
+                                    # starts.in.df.are.0based = TRUE, keep.extra.columns = TRUE, ignore.strand = TRUE)
+  return(bed)
+  # return(bed[,.(dar_id=paste(chrom,start,end,sep="_"), dar_status=ifelse(log2_ratio > 0, "opening", "closing"))])
+}
+
+
+mergeGtrd <- function (dt) {
+  df <- data.frame(chr   = gsub(pattern = "(chr.*)_[0-9]+_[0-9]+", replacement = "\\1", x = dt[["dar_id"]]),
+                   start = gsub(pattern = "chr.*_([0-9]+)_[0-9]+", replacement = "\\1", x = dt[["dar_id"]]),
+                   end   = gsub(pattern = "chr.*_[0-9]+_([0-9]+)", replacement = "\\1", x = dt[["dar_id"]]),
+                   name  = dt[["dar_id"]])
+  gr    <- makeGRangesFromDataFrame(df, starts.in.df.are.0based = FALSE, keep.extra.columns = TRUE)
+  olaps <- findOverlaps(gtrd, gr, type = "within")
+  tf_df <- data.frame(dar_id = gr$name[subjectHits(olaps)], gtrd_tf = gtrd$name[queryHits(olaps)])
+  tf_df <- aggregate(. ~ dar_id, data = tf_df, FUN = function(x) paste(as.character(unique(tf_df[x, "gtrd_tf"])), collapse = ", "))
+  merge(dt, tf_df, by = "dar_id", all.x = TRUE)
+}
+
+getQuadrant <- function (rna_lfc, atac_lfc) {
+  apply(cbind(atac_lfc, rna_lfc),1,function(row){
+    quadrant <- NA
+    if(row[1] >= 0 & row[2] >= 0) {
+      quadrant <- 1
+    } else if (row[1] >= 0 & row[2] < 0) {
+      quadrant <- 2
+    } else if (row[1] < 0 & row[2] < 0) {
+      quadrant <- 3
+    } else if (row[1] < 0 & row[2] >= 0) {
+      quadrant <- 4
+    }
+    return(quadrant)
+  })
+}
+```
+
+# Do computation
+
+```{r}
+dars <- list(PCvBPH = import_dars("dar/turp_corrected_log2ratio_2/with_comparison_group_col/homer/dars_pc_bph.ann.default.bed"),
+             CRPCvPC = import_dars("dar/turp_corrected_log2ratio_2/with_comparison_group_col/homer/dars_crpc_pc.ann.default.bed"))
+
+dars_raw <- list(PCvBPH = import_raw_dars("dar/turp_corrected_log2ratio_2/with_comparison_group_col/dars_pc_bph.bed"),
+                 CRPCvPC = import_raw_dars("dar/turp_corrected_log2ratio_2/with_comparison_group_col/dars_crpc_pc.bed"))
+
+gr    <- granges(rowRanges(rna_dds))
+proms <- promoters(gr, upstream = 1000, downstream = 100)
+names(proms) <- names(gr)
+
+gtrd <- import("/bmt-data/genomics/reference/gtrd/gtrd_meta_clusters_prostate_w_names.bed")
+
+out <- vector("list", length(dars))
+names(out) <- names(dars)
+for (i in seq_along(dars)) {
+
+  hits <- findOverlaps(dars[[i]], proms)
+  d <- dars[[i]][queryHits(hits)]$dar_id
+  p <- names(proms[subjectHits(hits)])
+
+  res <- data.frame(dar_id=d, gene_id=p, pearson=NA, spearman=NA, distance=NA)
+  # res <- data.frame(dar_id=d, gene_id=p, pearson=NA, spearman=NA)
+  for (j in seq_along(hits)) {
+    col <- p[j]
+    pj <- all_mrna_pearson[dar_id == d[j], ..col]
+    sj <- all_mrna_spearman[dar_id == d[j], ..col]
+    dj <- all_mrna_distance[dar_id == d[j], ..col]
+    
+    pj <- pj[!duplicated(pj)]
+    sj <- sj[!duplicated(sj)]
+    dj <- dj[!duplicated(dj)]
+    
+    pj <- round(as.numeric(pj),2)
+    sj <- round(as.numeric(sj),2)
+    dh <- as.numeric(dj)
+    
+    res[j,c("pearson", "spearman", "distance")] <- c(pj,sj,dj)
+    # res[j,c("pearson", "spearman")] <- c(pj,sj)
+    
+  }
+  comparison <- names(dars)[i]
+  
+  res <- merge(ann.gene, res, by = "gene_id", all.y = TRUE)
+  res <- res[,!sapply(res, function(col) all(is.na(col)))]
+  
+  res$de <- res$gene_id %in% rownames(de[[comparison]])
+  res$rna_lfc <- round(rna_lfc[[comparison]]$log2FoldChange[match(res$gene_id, rownames(rna_lfc[[comparison]]))],2)
+  
+  dt <- dars_raw[[comparison]]
+  res$atac_lfc <- dt[match(res$dar_id, dar_id), round(log2_ratio,2)]
+  
+  res <- as.data.frame(mergeGtrd(as.data.table(res)))
+  
+  res[,"quadrant"]  <- getQuadrant(res$rna_lfc, res$atac_lfc)
+  
+  out[[comparison]] <- res
+  
+}
+```
+
+## Save table
+
+```{r}
+out.dir <- "tables/correlation_turp/promoters_1000u_100d/"
+if(!dir.exists(out.dir)) dir.create(out.dir, recursive = TRUE)
+write.xlsx(out, file = file.path(out.dir, "correlation.xlsx"))
+```
+
+# Plot
+
+## Histogram
+
+```{r}
+out.dir <- "pictures/correlation_turp/promoters_1000u_100d"
+if(!dir.exists(out.dir)) dir.create(out.dir, recursive = TRUE)
+op <- par()
+pdf(file.path(out.dir,"promoters_histograms.pdf"))
+par(mfrow=c(2,2), oma = c(0,0,1,0))
+for (i in seq_along(out)) {
+  
+  medpear  <- median(out[[i]][,"pearson"])
+  medspear <- median(out[[i]][,"spearman"]) 
+  
+  hist(out[[i]][,"pearson"],  breaks = "fd", col = "grey90", main = names(out)[i], xlab = sprintf("Pearson correlation coeff - median = %.2f", medpear))
+  abline(v = medpear, lwd = 2, col = "dodgerblue")
+  hist(out[[i]][,"spearman"], breaks = "fd", col = "grey90", main = names(out)[i], xlab = sprintf("Spearman correlation coeff - median = %.2f", medspear))
+  abline(v = medspear, lwd = 2, col = "dodgerblue")
+}
+mtext("Correlation between genes and DARs in promoter area (from -1kbp to 100bp)", side = 3, line = 0, outer = TRUE)
+dev.off()
+```
+
+## Log2 fold change scatterplot
+
+```{r}
+source("R/doLFCscatterplot.R")
+out.dir <- "pictures/correlation_turp/promoters_1000u_100d"
+
+ps <- list()
+for (n in seq_along(out)) {
+  comparison <- names(out)[n]
+  
+  df <- out[[comparison]][,c("atac_lfc", "rna_lfc")]
+  colnames(df) <- c("x", "y")
+  # df$type <- "bg"
+  # df[out[[comparison]][,"de"], "type"] <- "de"
+  
+  
+  # alpha <- rep(0.1, nrow(df))
+  # alpha[df$type == "de"] <- 1
+  ps[[n]] <- doLFCscatter(df1 = df,
+                          ptitle1 = sprintf("%s (%d DAR-gene couples)", comparison, nrow(df)),
+                          return_grob = TRUE, ythr = NULL, 
+                          # colors = c("grey70", "red"), 
+                          # palpha = alpha, 
+                          legend_title = "", bilayer = FALSE)
+}
+
+gp          <- get.gpar()
+gp$fontsize <- 14
+gp$fontface <- "bold"
+gp$cex      <- 1.1
+ggsave(marrangeGrob(grobs = ps,
+                    nrow = 1, ncol = length(out),
+                    top = textGrob(label = "ATAC-seq log2 fold change of DARs in promoter area (from -1000bp to 100bp) vs RNA-seq log2 fold change",
+                                   gp=gp)),
+       filename=file.path(out.dir,"plot_bg.pdf"), width=15, height=7)
+
+```
+
+## Per-sector barplot
+
+```{r}
+doBarplot <- function (vect, main) {
+  t <- table(vect[!is.na(vect)])
+  xlim <- c(0, 1.1*max(t))
+  bplot <- barplot(t, main = main, horiz = TRUE, width = 0.85, xlim = xlim, yaxt="n")
+  text(x = t, y = bplot, label = t, pos = 4, cex = 0.8)
+  axis(2, at = bplot, labels = c("1"="Upper right (1)", "2"="Lower right (2)", "3"="Lower left (3)", "4"="Upper left (4)"), tick=FALSE, las=1, line=-0.5, cex.axis=0.65)
+}
+
+pdf(file.path(out.dir,"per_sector_counts_bg.pdf"))
+par(mfrow=c(2,1), oma = c(0,0,1,0))
+for (i in seq_along(out)) {
+  df <- out[[i]]
+  comparison <- names(out)[i]
+  doBarplot(df$quadrant, comparison)
+}
+mtext("Number of genes per sector of log2 fold change scatterplot", outer = T, line = 0)
+dev.off()
+par(op)
+```
+

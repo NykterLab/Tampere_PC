@@ -1,5 +1,5 @@
 ---
-title: 'Tampere PC: Gene expression vs ATAC signal around TSS corrlation (all genes and DEG)'
+title: 'Tampere PC: Gene expression vs ATAC signal around TSS correlation (all genes and DEG)'
 date: "`r format(Sys.time(), '%d %B, %Y')`"
 author: "Francesco Tabaro"
 output:

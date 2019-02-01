@@ -7,10 +7,17 @@ Current folder structure
 .
 ├── gene_expression
 │   ├── notebooks
-│   │   ├── ATACvsGeneExpression_all_genes_and_deg.rmd
-│   │   └── ATACvsGeneExpression_correlation_peaks.rmd
+│   │   ├── ATACvsGeneExpression_DAR_in_promoters.rmd
+│   │   ├── ATACvsGeneExpression_DAR_in_TAD.rmd
+│   │   ├── ATACvsGeneExpression_DARs.rmd
+│   │   ├── ATACvsGeneExpression_peaks.rmd
+│   │   ├── ATACvsGeneExpression_TSS.rmd
+│   │   └── GeneExpression_call_deg.rmd
 │   └── R
+│       ├── callDE.R
+│       ├── DARvGEXP_correlation_ALLvALL.R
 │       ├── doLFCscatterplot.R
-│       └── getAnnotationTable.R
+│       ├── getAnnotationTable.R
+│       └── plotDEG.R
 └── README.md
 ```

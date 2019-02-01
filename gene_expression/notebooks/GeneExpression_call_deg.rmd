@@ -1,0 +1,254 @@
+---
+title: 'Tampere PC: Call differentially expressed genes from RNA-seq data'
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+author: "Francesco Tabaro"
+output:
+  pdf_document:
+  toc: true
+toc_depth: 2
+number_sections: true  
+df_print: tibble
+fig_caption: true
+html_document:
+  toc: true
+toc_depth: 2
+number_sections: true
+fig_caption: true
+df_print: paged
+toc_float:
+  collapsed: false
+smooth_scroll: false
+---
+
+```{r}
+knitr::opts_knit$set(root.dir="/bmt-data/genomics/projects/tampere_pc/rna-seq")
+
+library(DESeq2)
+library(purrr)
+
+```
+
+# Load Ensembl annotation
+```{r}
+source("R/getAnnotationTable.R")
+ann <- getAnnotationTable()
+```
+
+# Load sample sheets
+
+## RNA-seq
+```{r}
+rna_sample_sheet <- read.csv("clinical_27_04_2012-1-rnaseq.csv", row.names="Sample.ID")
+```
+
+## ATAC-seq
+```{r}
+atac_sample_sheet <- read.table("sample_sheet.csv", header = T, sep = ",", strip.white = T, row.names="Sample.name")
+```
+
+# Set blacklist
+```{r}
+samples_blacklist <- c("BPH_337", "PC_4538", "PC_6102", "PC_6864", "CRPC_531")
+```
+
+# Genearate SummarizedExperiment object
+
+## Generate samples data from samples sheet
+```{r}
+rna_coldata <- data.frame(row.names            = rownames(rna_sample_sheet), 
+                          Type                 = factor(gsub("BPH.*", "BPH", trimws(rna_sample_sheet$Tissue.Type))),
+                          RNA.Isolation.method = factor(gsub("\\s", "_", gsub("Trizol.*", "Trizol", trimws(rna_sample_sheet$RNA.Isolation.protocol)))),
+                          sample               = rownames(rna_sample_sheet))
+rna_coldata <- DataFrame(rna_coldata)
+```
+
+## Generate data matrix
+```{r}
+  rna_samples <- rownames(rna_sample_sheet)
+  rna <- rna_samples %>%
+          purrr::map_chr(~ file.path(getwd(), RNA_SEQ_FOLDER, paste(., "bamReadsPerGene", "out", "tab", sep = "."))) %>%
+          purrr::map(safely(~ read.table(., row.names = 1, skip = 4))) %>%
+          purrr::set_names(rna_samples) %>%
+          purrr::transpose()
+  is_ok <- rna$error %>% purrr::map_lgl(is_null)
+  x <- rna$result[is_ok] %>%
+        purrr::map(~ {
+            v <- .[,1]
+            names(v) <- rownames(.)
+            v
+          }) %>%
+        as.data.frame()
+  x <- as.matrix(x)
+```
+
+## Generate gene ranges
+```{r}
+rowranges <- ann[ann$gene_id %in% rownames(x) & ann$type == "gene"]
+```
+
+## Collect data matrix, samples data and gene ranges into a SummarizedExperiment object
+```{r}
+x <- x[match(rownames(x), rowranges$gene_id), match(colnames(x), rownames(rna_coldata))]
+rna_se <- SummarizedExperiment(assays = SimpleList(counts = x), rowRanges = rowranges, colData = rna_coldata)
+```
+
+# Run DESeq2
+```{r}
+rna_dds <- DESeqDataSet(rna_se, design = ~ RNA.Isolation.method + Type)
+```
+
+## Remove lowly expressed genes
+```{r}
+rs <- rowSums(assay(rna_dds))
+# histogram!!
+lower_quartile_thr <- quantile(rs, 0.25)
+rna_dds <- rna_dds[rs > lower_quartile_thr, ] # remove lower quartile
+```
+
+## Remove low quality samples
+```{r}
+rna_dds <- rna_dds[,!colnames(rna_dds) %in% samples_blacklist]
+```
+
+## Keep samples for which we have ATAC-seq data
+```{r}
+rna_dds <- rna_dds[,colnames(rna_dds) %in% rownames(atac_sample_sheet)]
+```
+
+## Collapse replicates
+```{r}
+rna_dds <- collapseReplicates(rna_dds, rna_dds$sample) # collapse technical replicates
+```
+
+## Run DESeq2 fitting
+```{r}
+rna_dds <- DESeq(rna_dds, fitType = "local", parallel = F, quiet = F)
+```
+
+## Compute Trizol normalization
+
+### Get beta factors
+```{r}
+beta <- coef(rna_dds)[, "RNA.Isolation.method_Trizol_vs_Qiagen_AllPrep"]
+beta[is.na(beta)] <- 0
+```
+
+### Generate design matrix
+```{r}
+p <- colData(rna_dds)$RNA.Isolation.method
+p <- sapply(p, function(each) ifelse(each == "Trizol", TRUE, FALSE))
+p <- matrix(rep(p, times = length(beta)), nrow = length(beta), byrow = T)
+```
+
+### Compute normalization factors
+```{r}
+sf <- sizeFactors(rna_dds)
+sf <- matrix(rep(sf, times = nrow(rna_dds)), nrow = nrow(rna_dds), byrow = T)
+```
+
+### Perform normalization
+```{r}
+norm.counts <- counts(rna_dds, normalized = F) / sf
+norm.counts <- log2(norm.counts + 1) - (beta * p)
+```
+
+### Assign new slot in DESeqDataset object
+```{r}
+assay(rna_dds, "norm.counts") <- norm.counts
+```
+
+# Filter mithocondrial genes and keep protein coding genes
+```{r}
+rna_dds <- rna_dds[rowRanges(rna_dds)$gene_biotype == "protein_coding" & !rowRanges(rna_dds)$allZero & !(rowRanges(rna_dds)$gene_id %in% chrM$gene_id), ]
+```
+
+```{r, include=FALSE}
+save(rna_dds, file = "R_data/RNAdds.RData")
+save(x, file = "R_data/RNA_rcMatrix.RData")
+```
+
+# Call differentially expressed genes
+
+## Define helper
+```{r}
+get_deg <- function (contrast) {
+
+  sample_set1 <- grepl(x = colnames(rna_dds), pattern = sprintf("^%s", contrast[2]))
+  sample_set2 <- grepl(x = colnames(rna_dds), pattern = sprintf("^%s", contrast[3]))
+
+  res <- results(rna_dds, contrast = contrast, alpha = P_THR)
+  res$diff <- apply(2 ^ assay(rna_dds, "norm.counts")[, sample_set1], 1, median, na.rm = T) - apply(2 ^ assay(rna_dds, "norm.counts")[, sample_set2], 1, median, na.rm = T)
+
+  sbst <- subset(res, padj < P_THR & abs(log2FoldChange) > LFC_THR & abs(diff) > DIFF_THR)
+
+  return(list(res, sbst))
+}
+
+```
+
+## Call
+```{r}
+l <- get_deg(c("Type", "PC",   "BPH"))
+rna_PCvBPH <- l[[1]]
+de_PCvBPH <- l[[2]]
+
+l <- get_deg(c("Type", "CRPC",   "PC"))
+rna_CRPCvPC <- l[[1]]
+de_CRPCvPC <- l[[2]]
+
+l <- get_deg(c("Type", "CRPC",   "BPH"))
+rna_CRPCvBPH <- l[[1]]
+de_CRPCvBPH <- l[[2]]
+```
+
+```{r, include=FALSE}
+save(rna_PCvBPH, de_PCvBPH, rna_CRPCvPC, de_CRPCvPC, rna_CRPCvBPH, de_CRPCvBPH, 
+     file = "R_data/RNA_differentiallyExpressed.RData")
+```
+
+# Visualizations
+
+```{r}
+library(pheatmap)
+
+m1 <- assay(rna_dds, "norm.counts")[rownames(de_PCvBPH),]
+m2 <- assay(rna_dds, "norm.counts")[rownames(de_CRPCvPC),]
+
+pheatmap(m1, show_rownames = FALSE,
+	annotation_col = data.frame(row.names = colnames(m1),
+		type = colData(rna_dds)[,"Type"],
+		protocol = colData(rna_dds)[,"RNA.Isolation.method"]),
+	annotation_row = data.frame(row.names = rownames(m1),
+		lfc = de_PCvBPH$log2FoldChange,
+		p.val = de_PCvBPH$padj,
+		absdiff = de_PCvBPH$diff),
+	main = sprintf("PC vs BPH - n = %s", nrow(de_PCvBPH)),
+	scale = "row",
+	filename = "/bmt-data/genomics/projects/atac_workdir/pictures/DEG/PCvBPH_row.pdf",
+	height = 10,
+	width = 10)
+
+pheatmap(m2, show_rownames = FALSE,
+	annotation_col = data.frame(row.names = colnames(m2),
+		type = colData(rna_dds)[,"Type"],
+		protocol = colData(rna_dds)[,"RNA.Isolation.method"]),
+	annotation_row = data.frame(row.names = rownames(m2),
+		lfc = de_CRPCvPC$log2FoldChange,
+		p.val = de_CRPCvPC$padj,
+		absdiff = de_CRPCvPC$diff),
+	main = sprintf("CRPC vs PC - n = %s", nrow(de_CRPCvPC)),
+	scale = "row",
+	filename = "/bmt-data/genomics/projects/atac_workdir/pictures/DEG/CRPCvPC_row.pdf",
+	height = 10,
+	width = 10)
+
+
+d1 <- cbind(log2FoldChange=de_PCvBPH$log2FoldChange, absolute_median_difference=de_PCvBPH$diff, p.value=de_PCvBPH$padj, m1)
+d2 <- cbind(log2FoldChange=de_CRPCvPC$log2FoldChange, absolute_median_difference=de_CRPCvPC$diff, p.value=de_CRPCvPC$padj, m2)
+
+write.csv(d1, file = "/bmt-data/genomics/projects/atac_workdir/tables/DEG/de_PCvBPH.csv")
+write.csv(d2, file = "/bmt-data/genomics/projects/atac_workdir/tables/DEG/de_CRPCvPC.csv")
+```
+
+
+
