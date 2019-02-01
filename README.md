@@ -14,10 +14,8 @@ Current folder structure
 │   │   ├── ATACvsGeneExpression_TSS.rmd
 │   │   └── GeneExpression_call_deg.rmd
 │   └── R
-│       ├── callDE.R
 │       ├── DARvGEXP_correlation_ALLvALL.R
 │       ├── doLFCscatterplot.R
-│       ├── getAnnotationTable.R
-│       └── plotDEG.R
+│       └── getAnnotationTable.R
 └── README.md
 ```
