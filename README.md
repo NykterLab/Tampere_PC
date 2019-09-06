@@ -1,2 +1,2 @@
 # Tampere_PC
-Contains analysis and code for publications
+Contains analyses and code for publications
