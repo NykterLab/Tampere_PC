@@ -546,7 +546,7 @@ write.xlsx(x = list(mrna_only=as.data.frame(mrna_only),
 target <- list(PCvBPH   = list(de_PCvBPH,   contrast_PCvBPH),
                CRPCvPC  = list(de_CRPCvPC,  contrast_CRPCvPC))
 
-lfc <- doCor(target, NCORES)
+lfc <- doCor(target, shared.samples.rna, NCORES)
 
 for (i in seq_along(lfc)) {
   
@@ -580,17 +580,50 @@ annotated <- lapply(seq_along(lfc), function(i) {
 names(annotated) <- names(lfc)
 ```
 
+### Save tables
+
 ```{r}
 library(openxlsx)
 output.dir <- "tables/correlation_turp/tss_deg_v3"
 if(!dir.exists(output.dir)) dir.create(output.dir, recursive = TRUE)
-write.xlsx(x = annotated, file = file.path(output.dir, "degDar_correlation.xlsx"))
+write.xlsx(x = annotated, file = file.path(output.dir, "degTss_correlation.xlsx"))
 # for (i in seq_along(annotated)) {
   # write.csv(annotated[[i]], file = file.path(output.dir, paste0(names(annotated)[[i]],".csv")), row.names = FALSE)
 # }
 ```
 
-## Plot correlation coefficient distributions, count genes per sector and do barplot
+```{r}
+annotated <- lapply(seq_along(lfc), function(i) {
+  df <- lfc_bg[[i]]
+  df$gene_id <- rownames(df)
+  
+  
+  # contrast <- names(lfc)[i]
+  # fn <- tolower(gsub("([A-Z]+)v([A-Z]+)","dars_\\1_\\2.bed", contrast))
+  
+  merge(df,ann.gene,by="gene_id", all.x = TRUE)
+})
+names(annotated) <- names(lfc)
+write.xlsx(annotated, file = file.path(output.dir, "allTss_correlation.xlsx"))
+```
+
+```{r}
+annotated <- lapply(seq_along(lfc), function(i) {
+  df <- lfc_prot_bg[[i]]
+  df$gene_id <- rownames(df)
+  
+  
+  # contrast <- names(lfc)[i]
+  # fn <- tolower(gsub("([A-Z]+)v([A-Z]+)","dars_\\1_\\2.bed", contrast))
+  
+  merge(df,ann.gene,by.x = "ensgid", by.y = "gene_id", all.x = TRUE)
+})
+names(annotated) <- names(lfc)
+write.xlsx(annotated, file = file.path(output.dir, "allProtTss_correlation.xlsx"))
+```
+
+
+# Plot correlation coefficient distributions, count genes per sector and do barplot
 
 ```{r}
 doHist <- function(vect, main) {
@@ -726,8 +759,522 @@ ggsave(marrangeGrob(grobs = ps,
        filename=file.path(output.dir,"plot_bg_v2.pdf"), width=15, height=7)
 ```
 
+## Poster version
+
+```{r}
+all_pc_bph <- readWorkbook(xlsxFile = "tables/correlation_turp/tss_deg_v3/allTss_correlation.xlsx", sheet = 1)
+all_crpc_pc <- readWorkbook(xlsxFile = "tables/correlation_turp/tss_deg_v3/allTss_correlation.xlsx", sheet = 2)
+
+de_pc_bph <- readWorkbook(xlsxFile = "tables/correlation_turp/tss_deg_v3/degDar_correlation.xlsx", sheet = 1)
+de_crpc_pc <- readWorkbook(xlsxFile = "tables/correlation_turp/tss_deg_v3/degDar_correlation.xlsx", sheet = 2)
+
+```
+
+```{r}
+dir.create("pictures/scatterplot_correlation_turp/tss_deg_v4")
+pdf("pictures/scatterplot_correlation_turp/tss_deg_v4/plot.pdf", width = 14)
+
+cex.annotations <- 1.4
+
+par(mar = c(5,4,4,6) + 0.1, mfrow = c(1,2), oma = c(0,0,2,0) + 0.5, pty = "s", 
+    cex.axis = cex.annotations, cex.main = cex.annotations,cex.lab = cex.annotations)
+
+xlim <- c(-2,2)
+ylim <- c(-10, 10)
+
+x <- all_pc_bph$atac_log2FoldChange
+y <- all_pc_bph$rna_log2FoldChange
+
+x[x < xlim[1]] <- xlim[1]
+x[x > xlim[2]] <- xlim[2]
+y[y < ylim[1]] <- ylim[1]
+y[y > ylim[2]] <- ylim[2]
+
+plot(x,y, type = "n",
+     xlab = "ATAC-seq log2 fold change",
+     ylab = "RNA-seq log2 folde change",
+     axes = FALSE)
+
+xaxis <- pretty(xlim, n = 4)
+yaxis <- pretty(ylim, n = 6)
+rugx <- seq(xlim[1], xlim[2] - 0.5, by = 0.5)
+rugy <- seq(ylim[1], ylim[2] - 2.5, by = 2.5)
+
+xlabs <- rugx
+xlabs[!xlabs %in% xaxis] <- NA
+xlabs <- c(xlabs, xlim[2])
+ylabs <- rugy
+ylabs[!ylabs %in% yaxis] <- NA
+ylabs <- c(ylabs, ylim[2])
+
+Axis(side = 1, at = xaxis, labels = as.character(xaxis))
+rug(x = rugx, ticksize = -0.01, side = 1, lwd = 1)
+# rug(x = xaxis, ticksize = -0.03, side = 1, lwd = 1)
+
+Axis(side = 2, at = yaxis, labels = as.character(yaxis), las = 2)
+rug(x = rugy, ticksize = -0.01, side = 2, lwd = 1)
+# rug(x = yaxis, ticksize = -0.03, side = 2, lwd = 1)
+
+grid()
+box()
+
+points(x,y,cex = 0.2, pch = 19, col = "grey60")
+
+x <- de_pc_bph$atac_log2FoldChange
+y <- de_pc_bph$rna_log2FoldChange
+
+x[x < xlim[1]] <- xlim[1]
+x[x > xlim[2]] <- xlim[2]
+y[y < ylim[1]] <- ylim[1]
+y[y > ylim[2]] <- ylim[2]
 
 
+points(x,y,col = "red", 
+       pch = 19, cex = 0.2)
+
+title("PC vs BPH")
+
+abline(v=0,h=0)
+
+text(1.5,9.5,sprintf("%d/%d", 
+                     sum(de_pc_bph$atac_log2FoldChange > 0 & de_pc_bph$rna_log2FoldChange > 0),
+                     sum(all_pc_bph$quadrant == 1)),
+     cex = cex.annotations)
+
+text(1.5,-9.5,sprintf("%d/%d", 
+                     sum(de_pc_bph$atac_log2FoldChange > 0 & de_pc_bph$rna_log2FoldChange < 0),
+                     sum(all_pc_bph$quadrant == 2)),
+     cex = cex.annotations)
+
+text(-1.5,-9.5,sprintf("%d/%d", 
+                     sum(de_pc_bph$atac_log2FoldChange < 0 & de_pc_bph$rna_log2FoldChange < 0),
+                     sum(all_pc_bph$quadrant == 3)),
+     cex = cex.annotations)
+
+text(-1.5,9.5,sprintf("%d/%d", 
+                     sum(de_pc_bph$atac_log2FoldChange < 0 & de_pc_bph$rna_log2FoldChange > 0),
+                     sum(all_pc_bph$quadrant == 4)),
+     cex = cex.annotations)
+
+legend(2.25, 10, 
+       legend = c("All", "Deg"),
+       col = c("grey40", "red"),
+       pch = 19,
+       xpd = TRUE,
+       cex = cex.annotations)
+
+x <- all_crpc_pc$atac_log2FoldChange
+y <- all_crpc_pc$rna_log2FoldChange
+
+x[x < xlim[1]] <- xlim[1]
+x[x > xlim[2]] <- xlim[2]
+y[y < ylim[1]] <- ylim[1]
+y[y > ylim[2]] <- ylim[2]
+
+
+plot(x,y, type = "n",
+     xlab = "ATAC-seq log2 fold change",
+     ylab = "RNA-seq log2 folde change",
+     axes = FALSE)
+
+Axis(side = 1, at = xaxis, labels = as.character(xaxis))
+rug(x = rugx, ticksize = -0.01, side = 1, lwd = 1)
+# rug(x = xaxis, ticksize = -0.03, side = 1, lwd = 1)
+
+Axis(side = 2, at = yaxis, labels = as.character(yaxis), las = 2)
+rug(x = rugy, ticksize = -0.01, side = 2, lwd = 1)
+# rug(x = yaxis, ticksize = -0.03, side = 2, lwd = 1)
+
+grid()
+box()
+
+points(x,y,cex = 0.2,
+     pch = 19,
+     xlab = "ATAC-seq log2 fold change",
+     ylab = "RNA-seq log2 folde change",
+     col = "grey60"
+     # cex = cex
+     )
+
+x <- de_crpc_pc$atac_log2FoldChange
+y <- de_crpc_pc$rna_log2FoldChange
+
+x[x < xlim[1]] <- xlim[1]
+x[x > xlim[2]] <- xlim[2]
+y[y < ylim[1]] <- ylim[1]
+y[y > ylim[2]] <- ylim[2]
+
+points(x,y,col = "red", 
+       pch = 19, cex = 0.2)
+
+title("CRPC vs PC")
+abline(v=0,h=0)
+
+text(1.5,9.5,sprintf("%d/%d", 
+                     sum(de_crpc_pc$atac_log2FoldChange > 0 & de_crpc_pc$rna_log2FoldChange > 0),
+                     sum(all_crpc_pc$quadrant == 1)),
+     cex = cex.annotations)
+
+text(1.5,-9.5,sprintf("%d/%d", 
+                     sum(de_crpc_pc$atac_log2FoldChange > 0 & de_crpc_pc$rna_log2FoldChange < 0),
+                     sum(all_crpc_pc$quadrant == 2)),
+     cex = cex.annotations)
+
+text(-1.5,-9.5,sprintf("%d/%d", 
+                     sum(de_crpc_pc$atac_log2FoldChange < 0 & de_crpc_pc$rna_log2FoldChange < 0),
+                     sum(all_crpc_pc$quadrant == 3)),
+     cex = cex.annotations)
+
+text(-1.5,9.5,sprintf("%d/%d", 
+                     sum(de_crpc_pc$atac_log2FoldChange < 0 & de_crpc_pc$rna_log2FoldChange > 0),
+                     sum(all_crpc_pc$quadrant == 4)),
+     cex = cex.annotations)
+
+legend(2.25, 10, 
+       legend = c("All", "Deg"),
+       col = c("grey40", "red"),
+       pch = 19,
+       xpd = TRUE, 
+       cex = cex.annotations)
+
+title("Correlation of log2 fold changes at TSS", outer = TRUE, line = 1, cex = cex.annotations)
+dev.off()
+```
+
+## Paper version
+
+```{r}
+library(ggrepel)
+library(cowplot)
+library(grid)
+```
+
+
+```{r}
+# prostate cancer
+interesting_genes <- c("KLK3",# aka PSA
+                       "CDH1", "FOXA1", "CDKN1B", "ATM", "NKX3-1", "MED12", "PTEN", "RB1","AR")
+
+# oncogenes
+interesting_genes <- c(interesting_genes, "ABL1", "ABL2", "AKT1", "ATF1", "BCL11A", "BCL2", "BCL3", "BCL6", "BCR", "BRAF", "CARD11",
+                       "CBLB", "CCND1", "CCND2", "CCND3", "CDX2", "CTNNB1", "DDB2", "DDIT3", "DDX6", "DEK", "EGFR",
+                       "ELK4", "ERBB2", "ETV4", "ETV6", 
+                       "MECOM",  #"EVI1", 
+                       "EWSR1", "FEV", "FGFR1", "FGFR1OP", "FGFR2", "FUS", "GOLGA5", "GOPC", "HMGA1", "HMGA2", "HRAS",
+                       "IRF4", "JUN", "KIT", "KRAS", "LCK", "LMO2", "MAF", "MAFB", "MAML2", "MDM2", "MET", "MITF", 
+                       "KMT2A", # "MLL", 
+                       "MPL", "MYB", "MYC", 
+                       "MYCL", # "MYCL1", 
+                       "MYCN", "NCOA4","NFKB2", "NRAS", "NTRK1", "NUP214", "PAX8", "PDGFB", "PIK3CA", "PIM1", "PLAG1",
+                       "PPARG", "PTPN11","RAF1", "REL", "RET", "ROS1", "SMO", "SS18", "TCL1A", "TET2", "TFG", "TLX1",
+                       "TPR", "USP6")
+# tumor suppressor
+interesting_genes <- c(interesting_genes, "APC", "ARHGEF12", "ATM", "BCL11B", "BLM", "BMPR1A", "BRCA1", "BRCA2", "CARS",
+                       "CBFA2T3", "CDH1", "CDH11", "CDK6", "CDKN2C", "CEBPA", "CHEK2", "CREB1", "CREBBP", "CYLD", "DDX5",
+                       "EXT1", "EXT2", "FBXW7", "FH", "FLT3", "FOXP1", "GPC3", "IDH1", "IL2", "JAK2", "MAP2K4", "MDM4",
+                       "MEN1", "MLH1", "MSH2", "NF1", "NF2", "NOTCH1", "NPM1", "NR4A3", "NUP98", "PALB2", "PML", "PTEN",
+                       "RB1", "RUNX1", "SDHB", "SDHD", "SMARCA4", "SMARCB1", "SOCS1", "STK11", "SUFU", "SUZ12", "SYK",
+                       "TCF3", "TNFAIP3", "TP53", "TSC1", "TSC2", "VHL", "WRN", "WT1")
+
+# chromatin remodeling
+interesting_genes <- c(interesting_genes, "BRDT", "CHD1", "CHD2", "CHD3", "CHD4", "ARID3A", "HDAC1", "HDAC2", "HELLS",
+                       "CITED1", "ARID4A", "BRD2", "SMARCA1", "SMARCA2", "HLTF", "SMARCA4", "SMARCB1", "SMARCC1",
+                       "SMARCC2", "SMARCD1", "SMARCD2", "SMARCD3", "SMARCE1", "TAPBP", "BRD3", "ARID1A", "SMARCA5", 
+                       "HAT1", "HDAC3", 
+                       "KAT2B",  # "PCAF", 
+                       "BAZ1B", "CDYL", "HDAC9", "HDAC4", "HDAC6", "HDAC5", "CITED2", "ARID3B",
+                       "ARID5A", "BRD8", "BAZ2A", "BAZ1A", "BRD4", "BRD1", "CHD5", "BRD7", "BAZ2B", "SMARCAL1", 
+                       "HDAC7",  # "HDAC7A",
+                       "ARID4B", "CHRAC1", "CHD7", "HDAC8", "ARID1B", "CHD8", "BRD9", "HDAC11", "CHD9", "HDAC10", 
+                       "KAT8",  # "MYST1",
+                       "ARID5B", "CHD6", "CITED4")
+
+interesting_genes <- unique(interesting_genes)
+```
+
+### Figure 4b/c
+
+```{r}
+
+x <- all_pc_bph$atac_log2FoldChange
+y <- all_pc_bph$rna_log2FoldChange
+gn <- all_pc_bph$gene_name
+
+xlim <- c(-2,2)
+ylim <- c(-10, 10)
+
+x[x < xlim[1]] <- xlim[1]
+x[x > xlim[2]] <- xlim[2]
+y[y < ylim[1]] <- ylim[1]
+y[y > ylim[2]] <- ylim[2]
+
+df <- data.frame(x,y,gene_name=gn)
+
+
+x <- de_pc_bph$atac_log2FoldChange
+y <- de_pc_bph$rna_log2FoldChange
+gn <- de_pc_bph$gene_name
+
+x[x < xlim[1]] <- xlim[1]
+x[x > xlim[2]] <- xlim[2]
+y[y < ylim[1]] <- ylim[1]
+y[y > ylim[2]] <- ylim[2]
+
+df_deg <- data.frame(x,y,gene_name=gn)
+# df_deg$gene_name <- ifelse(df_deg$gene_name %in% interesting_genes, as.character(df_deg$gene_name), "")
+
+df$de <- ifelse(all_pc_bph$gene_name %in% de_pc_bph$gene_name, "Yes", "No")
+df$gene_name <- ifelse(df$gene_name %in% interesting_genes & df$de == "Yes", as.character(df$gene_name), "")
+# df$color <- ifelse(df$de == 1, "red", "gray70")
+
+
+fit1 <- lm( I(y) ~ 0 + x, data = df)
+deg_fit1 <- lm( I(y) ~ 0 + x, data = df_deg)
+
+r2_fit1 <- summary(fit1)$r.squared
+r2_deg_fit1 <- summary(deg_fit1)$r.squared
+
+p1 <- ggplot(df, aes(x,y, label = gene_name, color = factor(de))) +
+  scale_color_manual(values = c("gray60", "red"), name = "Differential expression") +
+  # scale_color_manual(name = "Differential expression", 
+  #                    values = c("gray60", "red", "gray40",                   "firebrick"), 
+  #                    labels = c("No",     "Yes", "Regression for all genes", "Regression for DE genes"),
+  #                    guide = guide_legend(override.aes = list(
+  #                      linetype = c(rep("blank", 2), "solid", "solid"),
+  #                      shape = c(rep(16, 2), NA, NA)),
+  #                      size = 2)) +
+  guides(colour = guide_legend(override.aes = list(size = 2))) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+  background_grid(major = "xy", minor = "none", colour.major = "gray90") +
+  geom_point(size = 0.2) +
+  geom_point(data = df_deg, mapping = aes(x,y, label = gene_name), size = 0.2, color = "red") +
+  geom_text_repel(force = 3, segment.colour = "grey30") +
+  geom_abline(slope = coef(fit1), intercept = 0, color = "gray40") +
+  geom_abline(slope = coef(deg_fit1), intercept = 0, color = "firebrick") +
+  annotate("text",x = 1.75, y = -8.5, size = 5, label = sprintf("R^2==%.2f", r2_fit1), parse = TRUE, color = "gray40") + 
+  annotate("text",x = 1.75, y = -7.5, size = 5, label = sprintf("R^2==%.2f", r2_deg_fit1), parse = TRUE, color = "firebrick") + 
+  # geom_smooth(method = "lm", color = "gray40", se = FALSE) + 
+  # geom_smooth(data = df_deg, mapping = aes(x,y), method = "lm", color = "firebrick", se = FALSE) + 
+  xlab("ATAC-seq log2 fold change") +
+  ylab("RNA-seq log2 fold change") +
+  ggtitle("BPH vs PC") +
+  annotate("text", x = 1.75,  y = 9.5,  size = 5, 
+           label = sprintf("%d/%d",                      
+                           sum(de_pc_bph$atac_log2FoldChange > 0 & de_pc_bph$rna_log2FoldChange > 0),
+                           sum(all_pc_bph$quadrant == 1))) +
+  annotate("text", x = 1.75,  y = -9.5, size = 5, 
+           label = sprintf("%d/%d", 
+                           sum(de_pc_bph$atac_log2FoldChange > 0 & de_pc_bph$rna_log2FoldChange < 0),
+                           sum(all_pc_bph$quadrant == 2))) +
+  annotate("text", x = -1.75, y = -9.5, size = 5, 
+           label = sprintf("%d/%d",                                             
+                           sum(de_pc_bph$atac_log2FoldChange < 0 & de_pc_bph$rna_log2FoldChange < 0),
+                           sum(all_pc_bph$quadrant == 3))) +
+  annotate("text", x = -1.75, y = 9.5,  size = 5, 
+           label = sprintf("%d/%d",
+                           sum(de_pc_bph$atac_log2FoldChange < 0 & de_pc_bph$rna_log2FoldChange > 0),
+                           sum(all_pc_bph$quadrant == 4))) +
+  theme(legend.position = "bottom",
+        legend.justification = "center",
+        legend.text = element_text(size = 15))
+
+
+
+x <- all_crpc_pc$atac_log2FoldChange
+y <- all_crpc_pc$rna_log2FoldChange
+gn <- all_crpc_pc$gene_name
+
+xlim <- c(-2,2)
+ylim <- c(-10, 10)
+
+x[x < xlim[1]] <- xlim[1]
+x[x > xlim[2]] <- xlim[2]
+y[y < ylim[1]] <- ylim[1]
+y[y > ylim[2]] <- ylim[2]
+
+df <- data.frame(x,y,gene_name=gn)
+
+
+x <- de_crpc_pc$atac_log2FoldChange
+y <- de_crpc_pc$rna_log2FoldChange
+gn <- de_crpc_pc$gene_name
+
+x[x < xlim[1]] <- xlim[1]
+x[x > xlim[2]] <- xlim[2]
+y[y < ylim[1]] <- ylim[1]
+y[y > ylim[2]] <- ylim[2]
+
+df_deg <- data.frame(x,y,gene_name=gn)
+# df_deg$gene_name <- ifelse(df_deg$gene_name %in% interesting_genes, as.character(df_deg$gene_name), "")
+
+df$de <- ifelse(all_crpc_pc$gene_name %in% de_crpc_pc$gene_name, "Yes", "No")
+df$gene_name <- ifelse(df$gene_name %in% interesting_genes & df$de == "Yes", as.character(df$gene_name), "")
+# df$color <- ifelse(df$de == 1, "red", "gray70")
+
+fit2 <- lm( I(y) ~ 0 + x, data = df)
+deg_fit2 <- lm( I(y) ~ 0 + x, data = df_deg)
+
+r2_fit2 <- summary(fit2)$r.squared
+r2_deg_fit2 <- summary(deg_fit2)$r.squared
+
+p2 <- ggplot(df, aes(x, y, label = gene_name, color = factor(de))) +
+  scale_color_manual(values = c("gray60", "red"), name = "Differential expression") +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+  background_grid(major = "xy", 
+                  minor = "none", 
+                  colour.major = "gray90") +
+  geom_point(size = 0.2) +
+  geom_point(data = df_deg, 
+             mapping = aes(x,y, label = gene_name), 
+             size = 0.2, 
+             color = "red") +
+  geom_text_repel(force = 3, 
+                  segment.colour = "grey30") +
+  geom_abline(slope = coef(fit2), 
+              intercept = 0, 
+              color = "gray40") +
+  geom_abline(slope = coef(deg_fit2), 
+              intercept = 0, 
+              color = "firebrick") +
+  annotate("text",x = 1.75, y = -8.5, size = 5, label = sprintf("R^2==%.2f", r2_fit2), parse = TRUE, color = "gray40") + 
+  annotate("text",x = 1.75, y = -7.5, size = 5, label = sprintf("R^2==%.2f", r2_deg_fit2), parse = TRUE, color = "firebrick") + 
+  # geom_smooth(method = "lm", color = "gray40", se = FALSE) + 
+  # geom_smooth(data = df_deg, mapping = aes(x,y), method = "lm", color = "firebrick", se = FALSE) + 
+  xlab("ATAC-seq log2 fold change") +
+  ylab("RNA-seq log2 fold change") +
+  ggtitle("CRPC vs PC") +
+  annotate("text", x = 1.75,  y = 9.5,  size = 5, 
+           label = sprintf("%d/%d",                      
+                           sum(de_crpc_pc$atac_log2FoldChange > 0 & de_crpc_pc$rna_log2FoldChange > 0),
+                           sum(all_crpc_pc$quadrant == 1))) +
+  annotate("text", x = 1.75,  y = -9.5, size = 5, 
+           label = sprintf("%d/%d", 
+                           sum(de_crpc_pc$atac_log2FoldChange > 0 & de_crpc_pc$rna_log2FoldChange < 0),
+                           sum(all_crpc_pc$quadrant == 2))) +
+  annotate("text", x = -1.75, y = -9.5, size = 5, 
+           label = sprintf("%d/%d",                                             
+                           sum(de_crpc_pc$atac_log2FoldChange < 0 & de_crpc_pc$rna_log2FoldChange < 0),
+                           sum(all_crpc_pc$quadrant == 3))) +
+  annotate("text", x = -1.75, y = 9.5,  size = 5, 
+           label = sprintf("%d/%d",
+                           sum(de_crpc_pc$atac_log2FoldChange < 0 & de_crpc_pc$rna_log2FoldChange > 0),
+                           sum(all_crpc_pc$quadrant == 4))) +
+  theme(legend.position = "bottom",
+        legend.justification = "center",
+        legend.text = element_text(size = 15))
+  # theme(legend.position = "none")
+
+# leg <- get_legend(p1)
+# p1 <- p1 + theme(legend.position = "none")
+
+gp <- get.gpar()
+gp$fontsize <- 16
+gp$fontface <- 2
+
+p <- plot_grid(p1,p2, ncol = 2, align = "h")
+# p <- plot_grid(textGrob("TSS", gp = gp), p, leg, nrow = 3, rel_heights = c(0.1, 1, 0.1))
+# p <- plot_grid(textGrob("TSS", gp = gp), p, nrow = 2, rel_heights = c(0.1, 1))
+
+ggsave(p, filename = "~/test/plot.pdf", width = 14, height = 7)
+
+
+```
+
+### Figure 4d
+
+```{r}
+library(MASS)
+
+# interesting_genes <- c("AR","FOXA1",
+#                        "NR4A3","CITED2",
+#                        "JUN","MYC",
+#                        "PIM1","BCL11A",
+#                        "CCND2","KIT",
+#                        "FGFR2","TNFAIP3")
+
+interesting_genes <- c("AR", "BCL11A", "MYC")
+
+
+gp <- get.gpar()
+gp$fontsize <- 16
+gp$fontface <- 2
+
+
+plist <- setNames(vector("list", length(interesting_genes)), interesting_genes)
+legend <- NULL
+for (i in seq_along(interesting_genes)) {
+  ensgid <- ann[ann$gene_name == interesting_genes[i] & ann$type == "gene"]$gene_id
+  
+  # if (ensgid %in% as.character(de_pc_bph$gene_id)) {
+  #   pears1 <- de_pc_bph[as.character(de_pc_bph$gene_id) == ensgid, "pearson"] 
+  #   spear1 <- de_pc_bph[as.character(de_pc_bph$gene_id) == ensgid, "spearman"]  
+  # } else {
+  #   pears1 <- NA
+  #   spear1 <- NA
+  # }
+  # 
+  # if (ensgid %in% as.character(de_crpc_pc$gene_id)) {
+  #   pears2 <- de_crpc_pc[as.character(de_crpc_pc$gene_id) == ensgid, "pearson"]
+  #   spear2 <- de_crpc_pc[as.character(de_crpc_pc$gene_id) == ensgid, "spearman"]
+  # } else {
+  #   pears2 <- NA
+  #   spear2 <- NA
+  # }
+  # pearson <- c(pears1, pears2)
+  # spearman <- c(spear1, spear2)
+  # 
+  # cordf <- data.frame(row.names = c("PC vs BPH", "CRPC vs PC"), 
+  #                  pearson = pearson, 
+  #                  spearman = spearman)
+  # pt <- tableGrob(cordf)
+  
+  
+  gexp <- assay(rna_dds,"norm.counts")[ensgid,]
+  idx <- names(atac_rc_mat) %in% names(gexp)
+  atac <- atac_rc_mat[gid == ensgid, ..idx]
+  atac <- setNames(as.numeric(atac), names(atac))
+  
+  df <- as.data.frame(cbind(gexp, atac))
+  df$type <- gsub("^(PC|BPH|CRPC)_.+", "\\1", rownames(df))
+  df <- base::within(df, type <- factor(type, levels = c("BPH", "PC", "CRPC")))
+  
+  p <- ggplot(df, aes(gexp, atac)) + 
+    coord_cartesian() +
+    scale_color_manual(values = c("#33CC00", "#0066FF", "#FF0033"), name = "Sample\ntype") +
+    geom_point(aes(color = type)) +
+    geom_smooth(method = MASS::rlm, method.args = list(psi = psi.bisquare), se = FALSE, size = 1, colour = "gray60") +
+    xlab("Gene expression") +
+    ylab("Chromatin accessibility") +
+    theme(aspect.ratio = 1)
+          # axis.title = element_text(size = 10))
+  
+  # g <- plot_grid(pt, p, ncol = 2, rel_widths = c(1,1))
+  
+  # title <- textGrob(interesting_genes[i], gp = gp)
+  # 
+  # plist[[i]] <- plot_grid(title, g, nrow =2, rel_heights = c(0.1,1))
+  
+  if(is.null(legend)) {
+    legend <- get_legend(p)
+  }
+  
+  p <- p + theme(legend.position = "none")
+  title <- textGrob(interesting_genes[i], gp = gp)
+  plist[[i]] <- plot_grid(title, p, nrow =2, rel_heights = c(0.1,1))
+
+}
+
+pp <- plot_grid(plotlist = plist, ncol = 3)
+pp <- plot_grid(pp, legend, ncol = 2, rel_widths = c(1,0.1))
+
+# marrangeGrob(grobs = plist, ncol = 2, nrow = 2)
+ggsave(pp, filename = "~/projects/atacseq_tamperepc/interesting_genes_scatter2.pdf",
+       height = 5, width= 14)
+
+
+```
 
 
 

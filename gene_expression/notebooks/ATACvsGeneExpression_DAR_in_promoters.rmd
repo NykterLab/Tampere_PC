@@ -52,22 +52,68 @@ if(!exists("ann") | !exists("ann.gene")){
 }
 ```
 
+## Protein
+```{r}
+prot_rc <- fread("tables/swissprotdata_normalized.tsv")
+
+all_prot_map <- prot_rc[,.(uniprot, gn)]
+all_prot_map[, ensgid := ann.gene$gene_id[match(gn, ann.gene$gene_name)]]
+all_prot_map[match(missing_map$uniprot, uniprot), ensgid := missing_map[match(uniprot, uniprot), ensgid]]
+
+prot_rc <- merge(all_prot_map, prot_rc, by = c("uniprot", "gn"), all.y = TRUE)
+```
+
 ## Correlation matrices
 
 RNA-seq (genes), sRNA-seq (miRNA) and SWATH (proteins)
 
 ```{r}
-if(!exists("all_mrna_pearson"))   all_mrna_pearson   <- fread("dar/correlation/all_genes/combined_3_comparisons_pearson.tsv");  names(all_mrna_pearson)[1]   <- "dar_id"
-if(!exists("all_mrna_spearman"))  all_mrna_spearman  <- fread("dar/correlation/all_genes/combined_3_comparisons_spearman.tsv"); names(all_mrna_spearman)[1]  <- "dar_id"
-if(!exists("all_mrna_distance"))  all_mrna_distance  <- fread("dar/correlation/all_genes/combined_3_comparisons_distance.tsv"); names(all_mrna_distance)[1]  <- "dar_id"
+if(!exists("all_mrna_pearson")){
+  all_mrna_pearson   <- fread("dar/correlation/all_genes/combined_3_comparisons_pearson.tsv");  
+  names(all_mrna_pearson)[1]   <- "dar_id"
+}
+if(!exists("all_mrna_spearman")){  
+  all_mrna_spearman  <- fread("dar/correlation/all_genes/combined_3_comparisons_spearman.tsv"); 
+  names(all_mrna_spearman)[1]  <- "dar_id"
+}
+if(!exists("all_mrna_distance")){  
+  all_mrna_distance  <- fread("dar/correlation/all_genes/combined_3_comparisons_distance.tsv"); 
+  names(all_mrna_distance)[1]  <- "dar_id"
+}
 
-if(!exists("all_mirna_pearson"))  all_mirna_pearson  <- fread("dar/correlation/all_mirna/combined_3_comparisons_pearson.tsv");  names(all_mirna_pearson)[1]  <- "dar_id"
-if(!exists("all_mirna_spearman")) all_mirna_spearman <- fread("dar/correlation/all_mirna/combined_3_comparisons_spearman.tsv"); names(all_mirna_spearman)[1] <- "dar_id"
-if(!exists("all_mirna_distance")) all_mirna_distance <- fread("dar/correlation/all_mirna/combined_3_comparisons_distance.tsv"); names(all_mirna_distance)[1] <- "dar_id"
+if(!exists("all_mirna_pearson")){  
+  all_mirna_pearson  <- fread("dar/correlation/all_mirna/combined_3_comparisons_pearson.tsv");  
+  names(all_mirna_pearson)[1]  <- "dar_id"
+}
+if(!exists("all_mirna_spearman")){ 
+  all_mirna_spearman <- fread("dar/correlation/all_mirna/combined_3_comparisons_spearman.tsv"); 
+  names(all_mirna_spearman)[1] <- "dar_id"
+}
+if(!exists("all_mirna_distance")){ 
+  all_mirna_distance <- fread("dar/correlation/all_mirna/combined_3_comparisons_distance.tsv"); 
+  names(all_mirna_distance)[1] <- "dar_id"
+}
 
-if(!exists("all_prot_pearson"))   all_prot_pearson   <- fread("dar/correlation/all_prot/combined_3_comparisons_pearson.tsv");  names(all_prot_pearson)[1]    <- "dar_id"
-if(!exists("all_prot_spearman"))  all_prot_spearman  <- fread("dar/correlation/all_prot/combined_3_comparisons_spearman.tsv"); names(all_prot_spearman)[1]   <- "dar_id"
+if(!exists("all_prot_pearson")){   
+  all_prot_pearson   <- fread("dar/correlation/all_prot/combined_3_comparisons_pearson.tsv");
+  names(all_prot_pearson) <-c("dar_id", prot_rc[,ensgid][match(names(all_prot_pearson), prot_rc[,uniprot], nomatch=0)])
+  # names(all_prot_pearson)[1]    <- "dar_id"
+}
+if(!exists("all_prot_spearman")){  
+  all_prot_spearman  <- fread("dar/correlation/all_prot/combined_3_comparisons_spearman.tsv"); 
+  names(all_prot_spearman) <-c("dar_id", prot_rc[,ensgid][match(names(all_prot_spearman), prot_rc[,uniprot], nomatch=0)])
+  # names(all_prot_spearman)[1]   <- "dar_id"
+}
 ```
+
+
+## GTRD
+
+```{r}
+gtrd_pca <- import("/bmt-data/genomics/reference/gtrd/gtrd_meta_clusters_prostate_w_names.bed")
+gtrd_all <- import("/bmt-data/genomics/reference/gtrd/gtrd_meta_clusters_all_w_names.bed")
+```
+
 
 # Generate mapping tables
 
@@ -137,15 +183,18 @@ import_raw_dars <- function (dars_path) {
 }
 
 
-mergeGtrd <- function (dt) {
+mergeGtrd <- function (dt, gtrd) {
+  gtrd_colname <- gsub("_", " ", deparse(substitute(gtrd)))
   df <- data.frame(chr   = gsub(pattern = "(chr.*)_[0-9]+_[0-9]+", replacement = "\\1", x = dt[["dar_id"]]),
                    start = gsub(pattern = "chr.*_([0-9]+)_[0-9]+", replacement = "\\1", x = dt[["dar_id"]]),
                    end   = gsub(pattern = "chr.*_[0-9]+_([0-9]+)", replacement = "\\1", x = dt[["dar_id"]]),
                    name  = dt[["dar_id"]])
   gr    <- makeGRangesFromDataFrame(df, starts.in.df.are.0based = FALSE, keep.extra.columns = TRUE)
   olaps <- findOverlaps(gtrd, gr, type = "within")
-  tf_df <- data.frame(dar_id = gr$name[subjectHits(olaps)], gtrd_tf = gtrd$name[queryHits(olaps)])
-  tf_df <- aggregate(. ~ dar_id, data = tf_df, FUN = function(x) paste(as.character(unique(tf_df[x, "gtrd_tf"])), collapse = ", "))
+  tf_df <- data.table(dar_id = gr$name[subjectHits(olaps)], gtrd_tf = gtrd$name[queryHits(olaps)])
+  # tf_df <- aggregate(. ~ dar_id, data = tf_df, FUN = function(x) paste(as.character(unique(tf_df[x, "gtrd_tf"])), collapse = ", "))
+  tf_df <- tf_df[,paste(unique(gtrd_tf), collapse=", "), by=dar_id]
+  names(tf_df) <- c("dar_id", gtrd_colname)
   merge(dt, tf_df, by = "dar_id", all.x = TRUE)
 }
 
@@ -179,7 +228,6 @@ gr    <- granges(rowRanges(rna_dds))
 proms <- promoters(gr, upstream = 1000, downstream = 100)
 names(proms) <- names(gr)
 
-gtrd <- import("/bmt-data/genomics/reference/gtrd/gtrd_meta_clusters_prostate_w_names.bed")
 
 out <- vector("list", length(dars))
 names(out) <- names(dars)
@@ -189,7 +237,7 @@ for (i in seq_along(dars)) {
   d <- dars[[i]][queryHits(hits)]$dar_id
   p <- names(proms[subjectHits(hits)])
 
-  res <- data.frame(dar_id=d, gene_id=p, pearson=NA, spearman=NA, distance=NA)
+  res <- data.frame(dar_id=d, gene_id=p, pearson=NA, spearman=NA, distance=NA, protein_pearson=NA, protein_spearman=NA)
   # res <- data.frame(dar_id=d, gene_id=p, pearson=NA, spearman=NA)
   for (j in seq_along(hits)) {
     col <- p[j]
@@ -205,7 +253,18 @@ for (i in seq_along(dars)) {
     sj <- round(as.numeric(sj),2)
     dh <- as.numeric(dj)
     
-    res[j,c("pearson", "spearman", "distance")] <- c(pj,sj,dj)
+    ppj <- NA
+    psj <- NA
+    
+    if (col %in% names(all_prot_pearson)){
+      ppj <- all_prot_pearson[dar_id == d[j], ..col]
+      psj <- all_prot_spearman[dar_id == d[j], ..col]
+      
+      ppj <- ppj[!duplicated(ppj)]
+      psj <- psj[!duplicated(psj)]
+    }
+    
+    res[j,c("pearson", "spearman", "distance", "protein_pearson", "protein_spearman")] <- c(pj,sj,dj,ppj,psj)
     # res[j,c("pearson", "spearman")] <- c(pj,sj)
     
   }
@@ -220,7 +279,9 @@ for (i in seq_along(dars)) {
   dt <- dars_raw[[comparison]]
   res$atac_lfc <- dt[match(res$dar_id, dar_id), round(log2_ratio,2)]
   
-  res <- as.data.frame(mergeGtrd(as.data.table(res)))
+  res <- mergeGtrd(as.data.table(res), gtrd_pca)
+  res <- mergeGtrd(res, gtrd_all)
+  res <- as.data.frame(res)
   
   res[,"quadrant"]  <- getQuadrant(res$rna_lfc, res$atac_lfc)
   
@@ -232,6 +293,7 @@ for (i in seq_along(dars)) {
 ## Save table
 
 ```{r}
+library(openxlsx)
 out.dir <- "tables/correlation_turp/promoters_1000u_100d/"
 if(!dir.exists(out.dir)) dir.create(out.dir, recursive = TRUE)
 write.xlsx(out, file = file.path(out.dir, "correlation.xlsx"))

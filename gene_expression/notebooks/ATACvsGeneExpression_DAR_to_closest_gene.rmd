@@ -29,8 +29,6 @@ library(DESeq2)
 library(data.table)
 library(cowplot)
 
-source("/bmt-data/genomics//projects//atac_workdir/R/doCorr.R")
-
 setDTthreads(NCORES)
 ```
 
@@ -38,7 +36,7 @@ setDTthreads(NCORES)
 
 Using Homer and default annotation files.
 
-```{bash, eval=FALSE}
+```{bash, eval=TRUE}
 module purge
 module load compbio/homer
 
@@ -56,7 +54,7 @@ done
 
 # Set blacklist
 
-```{r, cache=TRUE}
+```{r, cache=FALSE}
 dar_ge_corr_blacklist <- c("PC_15194", "PC_22603", "PC_4786")
 blacklist <- list( rna = c("BPH_337", "PC_4538", "PC_6102", "PC_6864", "CRPC_531", dar_ge_corr_blacklist), 
                    mirna = c("PC_6864", "CRPC_531", dar_ge_corr_blacklist))
@@ -67,7 +65,7 @@ blacklist <- list( rna = c("BPH_337", "PC_4538", "PC_6102", "PC_6864", "CRPC_531
 
 ## RNA-seq
 
-```{r, cache=TRUE}
+```{r, cache=FALSE}
 load("R_data/RNAdds.RData")
 load("R_data/RNA_differentiallyExpressed.RData")
 
@@ -95,7 +93,7 @@ rownames(prot) <- rn
 
 ## ATAC-seq
 
-```{r, cache=TRUE, eval=FALSE}
+```{r, cache=TRUE, eval=TRUE}
 
 DAR_MAT_PATH <- "dar/RCmat_mor_normed/turp_corrected.tsv.gz"
 
@@ -131,6 +129,14 @@ start(lncap_tad) <- start(lncap_tad) - 1
 esc_tad <- import("/bmt-data/genomics/projects/atac_workdir/dar_and_tad/h1_esc/h1_esc_tads.bed", format = "bed")
 start(esc_tad) <- start(esc_tad) - 1
 ```
+
+## GTRD
+
+```{r}
+gtrd_pca <- import("/bmt-data/genomics/reference/gtrd/gtrd_meta_clusters_prostate_w_names.bed")
+gtrd_all <- import("/bmt-data/genomics/reference/gtrd/gtrd_meta_clusters_all_w_names.bed")
+```
+
 
 ## Uniprot
 
@@ -176,7 +182,7 @@ samples <- list(all      = list(rna   = all_samples_rna,
 
 ## Define helper functions
 
-```{r, cache=TRUE}
+```{r, cache=FALSE}
 getDarTable <- function (dar_table_path) {
   t <- fread(dar_table_path)
   names(t)[1] <- "dar_id_orig"
@@ -257,7 +263,14 @@ remove_olaps <- function (c) {
 countsTable <- data.frame(row.names=c("total_dars", "dars_10kbpTSS", "unique_genes"))
 ```
 
+## Compute correlation
+
 ```{r}
+source("/bmt-data/genomics//projects//atac_workdir/R/doCorr.R")
+```
+
+
+```{r, echo=FALSE}
 target <- c(#"dar/turp_corrected_log2ratio_2/with_comparison_group_col/homer/combined_2_comparisons.ann.default.bed",
             #"dar/turp_corrected_log2ratio_2/with_comparison_group_col/homer/combined_3_comparisons.ann.default.bed",
             "dar/turp_corrected_log2ratio_2/with_comparison_group_col/homer/dars_pc_bph.ann.default.bed",
@@ -453,23 +466,29 @@ mergeWithHomerAnnot <- function (df, homer) {
 }
 
 mergeWithTad <- function (dar.tbl, tad, colname = NULL)    {
+  
   require(GenomicAlignments)
   dar.tbl$dar_id <- rownames(dar.tbl)
-  dar.tbl <- as.data.table(dar.tbl)
-  dar.gr <- makeGRangesFromDataFrame(as.data.frame(dar.tbl), 
+  
+  dar.gr <- makeGRangesFromDataFrame(dar.tbl, 
                                      keep.extra.columns = TRUE, 
                                      starts.in.df.are.0based = FALSE)
   olaps <- findOverlaps(dar.gr, tad)
-  dt <- data.table(dar_id = dar.tbl[["dar_id"]][queryHits(olaps)],
-                   tad = as.character(tad[subjectHits(olaps)]))
+  
+  dar.tbl <- as.data.table(dar.tbl)
+  
+  dt <- data.table(dar_id = dar.tbl[["dar_id"]][queryHits(olaps)], tad = as.character(tad[subjectHits(olaps)]))
   dt[, tad := paste(tad, collapse = ";"), by=dar_id]
   dt <- unique(dt, by = "dar_id")
+  
   if (!is.null(colname)) names(dt)[2] <- colname
+  
   merged <- merge(dar.tbl,dt, by="dar_id", all.x=TRUE)
   rn <- merged[["dar_id"]]
   merged <- as.data.frame(merged)
   rownames(merged) <- rn
   merged
+  
 }
 
 getHomerAnnotated <- function (path) {
@@ -481,6 +500,18 @@ getHomerAnnotated <- function (path) {
   df[,-1]
 }
 
+mergeGtrd <- function (df, gtrd) {
+  gtrd_colname <- gsub("_", " ", deparse(substitute(gtrd)))
+  gr    <- makeGRangesFromDataFrame(df, seqnames.field = "Chr", start.field = "Start", end.field = "End",
+                                    starts.in.df.are.0based = FALSE, keep.extra.columns = TRUE, 
+                                    ignore.strand = TRUE)
+  olaps <- findOverlaps(gtrd, gr, type = "within")
+  tf_df <- data.table(dar_id = gr$dar_id[subjectHits(olaps)], gtrd_tf = gtrd$name[queryHits(olaps)])
+  tf_df <- tf_df[,paste(unique(gtrd_tf), collapse = ", "), by = dar_id]
+  names(tf_df) <- c("dar_id", gtrd_colname)
+  # tf_df <- aggregate(. ~ dar_id, data = tf_df, FUN = function(x) paste(as.character(unique(tf_df[x, gtrd_colname])), collapse = ", "))
+  merge(df, tf_df, by = "dar_id", all.x = TRUE)
+}
 ```
 
 ## Set output dir
@@ -525,11 +556,15 @@ for (i in seq_along(target)) {
   t <- mergeWithDarBed(t, bed)
   t <- mergeWithTad(t, lncap_tad, "TAD LNCaP")
   t <- mergeWithTad(t, esc_tad,   "TAD H1 ESC")
+  t <- mergeGtrd(t, gtrd_pca)
+  t <- mergeGtrd(t, gtrd_all)
   results[[i]] <- t
 }
 
 write.xlsx(results, file = file.path(output_folder, "dar_correlation_homer_closest_gene.xlsx"))
 ```
+
+# Plot 
 
 ## Define helper
 

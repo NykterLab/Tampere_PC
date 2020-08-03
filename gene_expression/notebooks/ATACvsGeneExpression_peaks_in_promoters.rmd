@@ -1,0 +1,510 @@
+---
+title: 'Tampere PC: correlation of gene expression and ATAC peaks in promoter region'
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+author: "Francesco Tabaro"
+output:
+  pdf_document:
+  toc: true
+toc_depth: 2
+number_sections: true  
+df_print: tibble
+fig_caption: true
+html_document:
+  toc: true
+toc_depth: 2
+number_sections: true
+fig_caption: true
+df_print: paged
+toc_float:
+  collapsed: false
+smooth_scroll: false
+---
+
+```{r setup}
+knitr::opts_knit$set(root.dir="/bmt-data/genomics//projects//atac_workdir/")
+
+library(data.table)
+library(DESeq2)
+library(GenomicAlignments)
+
+NCORES <- floor(parallel::detectCores() * 0.5)
+setDTthreads(NCORES)
+```
+
+# Load data
+
+## Ensembl
+
+```{r}
+source("R/getAnnotationTable.R")
+ann         <- getAnnotationTable()
+ann.gene.gr <- ann[ann$type == "gene"]
+ann.gene    <- as.data.frame(ann.gene.gr)
+```
+
+## RNA-seq
+
+```{r}
+load("/bmt-data/genomics/projects/atac_workdir/R_data/RNAdds.RData")
+rna_rc <- assay(rna_dds, "norm.counts")
+```
+
+## sRNA-seq
+
+```{r}
+load("/bmt-data/genomics/projects/atac_workdir/R_data/sRNA_dds.RData")
+srna_rc <- assay(srna_se_filter, "norm.counts")
+```
+
+## Proteins
+
+```{r}
+uniprot <- fread("tables/swissprotdata_normalized.tsv")
+
+biomart_map <- fread("tables/uniprot2ensembleGeneID/biomart_missing_uniprot.tsv", select = c(1,2)) # mapping from Biomart (Ensembl 90)
+names(biomart_map) <- c("uniprot", "ensgid")
+biomart_map[, ensgid := paste(ensgid, collapse = "|"), by = uniprot]
+
+uniprot_map <- fread("tables/uniprot2ensembleGeneID/uniprot_mapping_missed.tsv") # mapping from Uniprot (unknown Ensembl)
+names(uniprot_map) <- c("uniprot", "ensgid")
+uniprot_map[, ensgid := paste(ensgid, collapse = "|"), by = uniprot]
+
+missing_map <- rbind(biomart_map, uniprot_map)
+missing_map <- missing_map[!duplicated(missing_map)]
+missing_map[, ensgid := sapply(ensgid, function(x) ifelse(any(grepl(x, ann.gene$gene_id)), grep(x, ann.gene$gene_id, value = TRUE), ""))]
+missing_map <- missing_map[ensgid != ""]
+
+uniprot[, ensgid := ann.gene$gene_id[match(gn, ann.gene$gene_name)]]
+uniprot[match(missing_map$uniprot, uniprot), ensgid := missing_map[match(uniprot, uniprot), ensgid]]
+
+```
+
+
+## Promoter ranges
+
+```{r}
+gr <- granges(c(rowRanges(rna_dds), rowRanges(srna_se_filter)))
+proms <- promoters(gr, upstream = 1000, downstream = 100)
+```
+
+
+## ATAC-seq signal 
+
+```{r}
+atac_rc_peaks <- fread("peak_tss_dar_quantifications/peak_quantification.tsv.gz")
+atac_rc_peaks[,`:=`(peak_id = paste(chrom, start, end, sep = "_"), chrom=NULL, start=NULL, end=NULL)]
+```
+
+## Peaks ranges
+
+```{r}
+atac_peaks <- fread("heterogeneity/peaks_and_their_corresponding_samples.tsv")
+names(atac_peaks) <- c("chrom", "start", "end", "samples")
+atac_peaks[,peak_id := paste(chrom, start, end, sep = "_")]
+atac_peaks <- makeGRangesFromDataFrame(as.data.frame(atac_peaks), keep.extra.columns = TRUE, starts.in.df.are.0based = TRUE)
+names(atac_peaks) <- atac_peaks$peak_id
+```
+
+# Fix samples
+
+```{r}
+deg_blacklist <- c("BPH_337", "PC_4538", "PC_6102", "PC_6864", "CRPC_531")
+peaks_ge_corr_blacklist <- c(deg_blacklist, "PC_15194", "PC_22603", "PC_4786")
+
+samples <- Reduce(intersect, list(colnames(rna_dds), colnames(atac_rc_peaks), colnames(srna_se_filter))) # 28 samples
+
+sample.proteins <- intersect(names(atac_rc_peaks), names(uniprot)) # 26
+
+```
+
+# Build unified RNA matrix
+
+```{r}
+rna_rc <- rbind(rna_rc[,samples], srna_rc[,samples])
+```
+
+# Find peaks in promoters
+
+```{r}
+olaps <- findOverlaps(proms, atac_peaks)
+proms_with_olap <- names(proms)[queryHits(olaps)]
+peaks_with_olap <- names(atac_peaks)[subjectHits(olaps)]
+```
+
+# Compute correlation
+
+```{r}
+res <- do.call(rbind, mclapply(seq_along(olaps), function(i) {
+# for(i in seq_along(olaps)) {
+  gid <- proms_with_olap[i]
+  pid <- peaks_with_olap[i]
+
+  rna <- rna_rc[gid, samples]
+  
+  atac <- atac_rc_peaks[peak_id == pid, -"peak_id", with = FALSE]
+  atac <- atac[,..samples]
+  atac <- setNames(as.numeric(atac), names(atac))
+  
+  stopifnot(all(names(rna) == names(atac)))
+  
+  pearson  <- round(cor(rna,atac,method = "pearson"),2)
+  spearman <- round(cor(rna,atac,method = "spearman"),2)
+  
+  if(gid %in% uniprot[["ensgid"]]) {
+    atac <- setNames(as.numeric(atac_rc_peaks[peak_id == pid, ..sample.proteins]), sample.proteins)
+    
+    tmp <- uniprot[ensgid == gid]
+    
+    available.uniprot <- uniprot[ensgid == gid, uniprot]
+    pearson.prot <- rep(NA,length(available.uniprot))
+    spearman.prot <- rep(NA,length(available.uniprot))
+    uid <- rep(NA, length(available.uniprot))
+    
+    for (ii in seq_along(available.uniprot)) {
+  
+      prot <- setNames(as.numeric(tmp[ii, ..sample.proteins]), sample.proteins)
+      
+      stopifnot(all(names(atac) == names(prot)))
+      
+      uid[ii] <- as.character(uniprot[ensgid == gid, "uniprot"])
+      pearson.prot[ii]  <- round(cor(atac, prot, method = "pearson", use = "na.or.complete"),2)
+      spearman.prot[ii] <- round(cor(atac, prot, method = "spearman", use = "na.or.complete"),2)
+    }
+  } else {
+    pearson.prot <- NA
+    spearman.prot <- NA
+    uid <- NA
+  }
+  
+  data.frame(gene_id = gid, peak_id=pid, pearson = pearson, spearman = spearman, 
+             pearson_protein = pearson.prot, spearman_protein = spearman.prot,
+             uniprot_id = uid, stringsAsFactors = FALSE)
+  # print(c(gid,pid))
+}, mc.cores = NCORES))
+```
+
+```{r}
+print(dim(res))
+```
+
+# Extend table
+
+## Convert miRNA names to Ensembl gene IDs
+
+```{r}
+mir <- grep("hsa", res$gene_id, value = TRUE, ignore.case = TRUE)
+pat <- gsub(pattern = "hsa-(?:mir|let)-([a-z0-9]+(?:-[0-9])?)(?:-[0-9a-z]+)?$", replacement = "mir\\1$", x = mir, ignore.case = TRUE)
+idx <- sapply(pat, function(x){ 
+  i <-  grep(pattern = x, x = ann.gene$gene_name, ignore.case = TRUE)
+  ifelse(length(i) == 0, NA_integer_, i[1])
+})
+
+mir_map <- data.frame(mir=mir,ensg=ann.gene$gene_id[idx], stringsAsFactors = FALSE)
+res$gene_id_map <- NA
+res$gene_id_map[grep("ensg", res$gene_id, ignore.case = TRUE)] <- res$gene_id[grep("ensg", res$gene_id, ignore.case = TRUE)]
+res$gene_id_map[grep("hsa", res$gene_id, ignore.case=TRUE)] <- mir_map[match(res$gene_id[grep("hsa", res$gene_id, ignore.case=TRUE)], mir_map$mir), "ensg"]
+```
+
+```{r}
+print(dim(res))
+```
+
+
+## Join correlation table to annotation
+
+```{r}
+res <- merge(res,ann.gene, by.x="gene_id_map", by.y="gene_id", all.x = TRUE)
+print(dim(res))
+```
+
+## Join with de status
+
+```{r}
+load("R_data/RNA_differentiallyExpressed.RData")
+res$PCvBPH_de  <- res$gene_id_map %in% rownames(de_PCvBPH)
+res$PCvBPH_lfc <- round(rna_PCvBPH$log2FoldChange[match(res$gene_id_map, rownames(rna_PCvBPH))],2)
+res$CRPCvPC_de <- res$gene_id_map %in% rownames(de_CRPCvPC)
+res$CRPCvPC_lfc <- round(rna_CRPCvPC$log2FoldChange[match(res$gene_id_map, rownames(rna_CRPCvPC))],2)
+print(dim(res))
+```
+
+## Add peaks sample list
+
+```{r}
+tmp <- data.frame(peak_id=names(atac_peaks),peak_samples=atac_peaks$samples)
+res <- merge(res,tmp,by="peak_id", all.x=TRUE)
+print(dim(res))
+```
+
+## TAD annotation
+
+```{r}
+lncap_tad <- import("dar_and_tad/lncap/lncap_tads.bed")
+h1esc_tad <- import("dar_and_tad/h1_esc/h1_esc_tads.bed")
+```
+
+```{r}
+mergeTad <- function (dt, tad) {
+  tad_colname <- gsub("_", " ", deparse(substitute(tad)))
+  dt[,tmpid:=paste0(peak_id,gene_id,uniprot_id)]
+  df <- data.frame(chr   = gsub(pattern = "(chr.*)_[0-9]+_[0-9]+", replacement = "\\1", x = dt[["peak_id"]]),
+                   start = gsub(pattern = "chr.*_([0-9]+)_[0-9]+", replacement = "\\1", x = dt[["peak_id"]]),
+                   end   = gsub(pattern = "chr.*_[0-9]+_([0-9]+)", replacement = "\\1", x = dt[["peak_id"]]),
+                   #name  = dt[["peak_id"]], 
+                   tmpid   = dt[["tmpid"]], 
+                   stringsAsFactors = FALSE)  
+  gr    <- makeGRangesFromDataFrame(df, starts.in.df.are.0based = FALSE, keep.extra.columns = TRUE)
+  olaps <- findOverlaps(tad, gr)
+  tad_df <- data.table(tmpid = gr$tmpid[subjectHits(olaps)], tad_id = as.character(tad)[queryHits(olaps)])
+  tad_df <- tad_df[, paste(unique(tad_id), collapse = ", "), by = tmpid]
+  names(tad_df) <- c("tmpid", tad_colname)
+  
+  ret <- merge(dt, tad_df, by = "tmpid",  all.x = TRUE)
+  ret[,tmpid:=NULL]
+  ret
+}
+
+res <- as.data.table(res)
+res <- mergeTad(res,lncap_tad)
+res <- mergeTad(res,h1esc_tad)
+res <- as.data.frame(res)
+```
+
+
+## Add GTRD TFBS annotation
+
+```{r}
+gtrd_pca <- import("/bmt-data/genomics/reference/gtrd/gtrd_meta_clusters_prostate_w_names.bed")
+gtrd_all <- import("/bmt-data/genomics/reference/gtrd/gtrd_meta_clusters_all_w_names.bed")
+```
+
+
+```{r}
+mergeGtrd <- function (dt, gtrd) {
+  dt[,tmpid := paste0(peak_id,gene_id,uniprot_id)]
+  gtrd_colname <- gsub("_", " ", deparse(substitute(gtrd)))
+  df <- data.frame(chr   = gsub(pattern = "(chr.*)_[0-9]+_[0-9]+", replacement = "\\1", x = dt[["peak_id"]]),
+                   start = gsub(pattern = "chr.*_([0-9]+)_[0-9]+", replacement = "\\1", x = dt[["peak_id"]]),
+                   end   = gsub(pattern = "chr.*_[0-9]+_([0-9]+)", replacement = "\\1", x = dt[["peak_id"]]),
+                   #name  = dt[["peak_id"]], 
+                   tmpid   = dt[["tmpid"]], 
+                   stringsAsFactors = FALSE)
+  gr    <- makeGRangesFromDataFrame(df, starts.in.df.are.0based = FALSE, keep.extra.columns = TRUE)
+  olaps <- findOverlaps(gtrd, gr, type = "within")
+  tf_df <- data.table(tmpid = gr$tmpid[subjectHits(olaps)], gtrd_tf = gtrd$name[queryHits(olaps)])
+  tf_df <- tf_df[, paste(gtrd_tf, collapse = ", "), by = tmpid]
+  names(tf_df) <- c("tmpid", gtrd_colname)
+  ret <- merge(dt, tf_df, by = "tmpid",  all.x = TRUE)
+  ret[,tmpid:=NULL]
+  ret
+}
+
+res <- mergeGtrd(as.data.table(res), gtrd_pca)
+res <- mergeGtrd(res, gtrd_all)
+res <- as.data.frame(res)
+```
+
+## Save table
+
+```{r}
+library(openxlsx)
+out.dir <- "/bmt-data/genomics/projects/atac_workdir/tables/correlation_peaks/promoters"
+if (!dir.exists(out.dir)) dir.create(out.dir, recursive = TRUE)
+write.xlsx(res, file = file.path(out.dir, "correlation_peaks.xlsx"))
+```
+
+# Make histograms
+
+```{r}
+pdf("/bmt-data/genomics/projects/atac_workdir/pictures/correlation_turp/correlation_peaks.pdf")
+par(mfrow=c(2,1), oma = c(0,0,3,0))
+hist(res$pearson, breaks = "fd", col = "grey90", main = "Pearson", xlab = sprintf("Pearson correlation coefficient - median = %.2f", median(res$pearson)))
+abline(v=median(res$pearson), col = "dodgerblue", lwd = 2)
+
+hist(res$spearman, breaks = "fd", col = "grey90", main = "Spearman", xlab = sprintf("Spearman correlation coefficient - median = %.2f", median(res$spearman)))
+abline(v=median(res$spearman), col = "dodgerblue", lwd = 2)
+
+mtext("Correlation between RNA-seq signal of genes\nand ATAC-seq signal of peaks in promoter region (-1kbp to 100bp around TSS)", outer = TRUE, line = 1)
+dev.off()
+```
+
+# Plot GTRD
+
+```{r}
+library(ggplot2)
+
+tfn <- unique(gtrd_all$name)
+all_tf <- data.frame(row.names=tfn, tf=tfn, pca=rep(0, length(tfn)), all=rep(0,length(tfn)))
+for(i in seq(nrow(res))) {
+  gtrdpca <- table(unlist(strsplit(res[i,"gtrd pca"], split = ", ")))
+  gtrdall <- table(unlist(strsplit(res[i,"gtrd all"], split = ", ")))
+  
+  all_tf[names(gtrdpca), "pca"] <- all_tf[names(gtrdpca), "pca"] + gtrdpca
+  all_tf[names(gtrdall), "all"] <- all_tf[names(gtrdall), "all"] + gtrdall
+  
+}
+
+# all_tf$pca <- scale(all_tf$pca, center = min(all_tf$pca), scale=max(all_tf$pca) - min(all_tf$pca))
+# all_tf$all <- scale(all_tf$all, center = min(all_tf$all), scale=max(all_tf$all) - min(all_tf$all))
+
+all_tf <- base::within(all_tf, tf <- factor(tf, levels = tf[order(pca, decreasing = TRUE)]))
+all_tf40 <- subset(all_tf, tf %in% levels(tf)[1:40])
+m <- melt(all_tf40)
+
+# p <- ggplot(m, aes(y=tf, x=variable)) + 
+#   geom_tile(aes(fill=value)) +
+#   # scale_y_discrete(labels = m$label) +
+#   coord_fixed(ratio = 0.01, expand = TRUE) + 
+#   theme(axis.text.y = element_text(size=0.5))
+# 
+# grid.draw(p)
+# ggsave(p, filename = "~/test/test.pdf")
+
+p <- ggplot(m, aes(x=tf, y=value, fill=variable)) + 
+  geom_bar(stat = "identity", position="dodge") + 
+  # scale_y_discrete(labels = m$label) +
+  # coord_fixed(ratio = 0.01, expand = TRUE) + 
+  ggtitle("Occurrences of (unique) transcription factor in peaks in promoter areas") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle=45, hjust = 1, size = 8))
+
+grid.draw(p)
+```
+
+```{r}
+
+tfn <- unique(gtrd_all$name)
+pca_tf <- matrix(0, length(tfn), 3, dimnames = list(tfn, c("bph", "pc", "crpc")))
+all_tf <- matrix(0, length(tfn), 3, dimnames = list(tfn, c("bph", "pc", "crpc")))
+
+
+for(i in seq(nrow(res))) {
+  samples <- unlist(strsplit(as.character(res[i,"peak_samples"]), split = ", "))
+  sample_type <- unique(tolower(gsub("^(PC|BPH|CRPC).*", "\\1", samples)))
+  pca_ith_tf <- table(unlist(strsplit(as.character(res[i, "gtrd pca"]), ", ")))
+  all_ith_tf <- table(unlist(strsplit(as.character(res[i, "gtrd all"]), ", ")))
+  
+  pca_ith_tf <- matrix(rep(pca_ith_tf, times = length(sample_type)), length(pca_ith_tf), length(sample_type), dimnames = list(names(pca_ith_tf), sample_type))
+  all_ith_tf <- matrix(rep(all_ith_tf, times = length(sample_type)), length(all_ith_tf), length(sample_type), dimnames = list(names(all_ith_tf), sample_type))
+  
+  pca_tf[rownames(pca_ith_tf), sample_type] <- pca_tf[rownames(pca_ith_tf), sample_type] + pca_ith_tf  
+  all_tf[rownames(all_ith_tf), sample_type] <- all_tf[rownames(all_ith_tf), sample_type] + all_ith_tf
+  
+}
+
+tf_count_by_type <- merge(all_tf, pca_tf, by = 0, suffixes = c("_all", "_pca"))
+tf_count_by_type <- tf_count_by_type[!apply(tf_count_by_type[,-1],1,function(x) all(x == 0)),]
+tf_count_by_type <- base::within(tf_count_by_type, Row.names <- factor(Row.names, levels = Row.names[order(apply(tf_count_by_type[-1],1,function(x) sum(x[4:6])), decreasing = TRUE)]))
+tf_count_by_type <- subset(tf_count_by_type, Row.names %in% levels(Row.names)[1:40])
+
+m <- melt(tf_count_by_type)
+m$group <- gsub(".*_(pca|all)", "\\1", x = m$variable)
+m$variable <- gsub("^(bph|pc|crpc).*", "\\1", m$variable)
+
+
+p <- ggplot(m, aes(x=as.factor(Row.names), y=value, fill=variable)) + 
+  geom_bar(stat="identity", position="dodge") + 
+  facet_grid(~ group) +
+  theme(axis.text.x = element_text(angle=60, hjust=1, size = 6)) +
+  ggtitle("GRTD TFBS in (all) peaks located in promoter areas")
+
+print(p)
+```
+
+
+# Count
+
+```{r}
+median(res$pearson)
+sd(res$pearson)
+```
+
+```{r}
+median(res$spearman)
+sd(res$spearman)
+
+```
+
+```{r}
+highcor <- subset(res, abs(pearson) > 0.5 | abs(spearman) > 0.5)
+dim(highcor)
+t <- table(highcor$gene_id)
+t[t>1]
+sum(highcor$PCvBPH_de)
+sum(highcor$CRPCvPC_de)
+
+gid <- unique(highcor$gene_id_map)
+table(ann$gene_biotype[ann$gene_id %in% gid & ann$type == "gene"])
+
+tfn <- unique(gtrd_all$name)
+pca_tf <- matrix(0, length(tfn), 3, dimnames = list(tfn, c("bph", "pc", "crpc")))
+all_tf <- matrix(0, length(tfn), 3, dimnames = list(tfn, c("bph", "pc", "crpc")))
+
+
+for(i in seq(nrow(highcor))) {
+  samples <- unlist(strsplit(as.character(highcor[i,"peak_samples"]), split = ", "))
+  sample_type <- unique(tolower(gsub("^(PC|BPH|CRPC).*", "\\1", samples)))
+  pca_ith_tf <- table(unlist(strsplit(as.character(highcor[i, "gtrd pca"]), ", ")))
+  all_ith_tf <- table(unlist(strsplit(as.character(highcor[i, "gtrd all"]), ", ")))
+  
+  pca_ith_tf <- matrix(rep(pca_ith_tf, times = length(sample_type)), length(pca_ith_tf), length(sample_type), dimnames = list(names(pca_ith_tf), sample_type))
+  all_ith_tf <- matrix(rep(all_ith_tf, times = length(sample_type)), length(all_ith_tf), length(sample_type), dimnames = list(names(all_ith_tf), sample_type))
+  
+  pca_tf[rownames(pca_ith_tf), sample_type] <- pca_tf[rownames(pca_ith_tf), sample_type] + pca_ith_tf  
+  all_tf[rownames(all_ith_tf), sample_type] <- all_tf[rownames(all_ith_tf), sample_type] + all_ith_tf
+  
+}
+
+tf_count_by_type <- merge(all_tf, pca_tf, by = 0, suffixes = c("_all", "_pca"))
+tf_count_by_type <- tf_count_by_type[!apply(tf_count_by_type[,-1],1,function(x) all(x == 0)),]
+tf_count_by_type <- base::within(tf_count_by_type, Row.names <- factor(Row.names, levels = Row.names[order(apply(tf_count_by_type[-1],1,function(x) sum(x[4:6])), decreasing = TRUE)]))
+tf_count_by_type <- subset(tf_count_by_type, Row.names %in% levels(Row.names)[1:40])
+
+m <- melt(tf_count_by_type)
+m$group <- gsub(".*_(pca|all)", "\\1", x = m$variable)
+m$variable <- gsub("^(bph|pc|crpc).*", "\\1", m$variable)
+
+
+p <- ggplot(m, aes(x=as.factor(Row.names), y=value, fill=variable)) + 
+  geom_bar(stat="identity", position="dodge") + 
+  facet_grid(~ group) +
+  theme(axis.text.x = element_text(angle=60, hjust=1, size = 6)) +
+  ggtitle("GTRD TFBS in highly correlating peaks located in promoter area")
+
+print(p)
+
+
+```
+
+
+
+```{r}
+atac_signal_hicor <- atac_rc_peaks[peak_id %in% highcor$peak_id]
+# rn <- atac_signal_hicor$peak_id
+# atac_signal_hicor <- as.matrix(atac_signal_hicor[,-"peak_id", with = FALSE])
+# rownames(atac_signal_hicor) <- rn
+
+
+
+m <- melt(atac_signal_hicor)
+m[, type := gsub("^(BPH|PC|CRPC).*", "\\1", variable)]
+
+m %>% dplyr::group_by(type) %>% dplyr::summarise(mean = round(mean(value),2), sd = round(sd(value),2))
+
+
+m <- as.data.frame(m)
+p <- ggplot(m, aes(type,log2(value+1))) + 
+  geom_boxplot() + 
+  scale_y_continuous(breaks = round(seq(0,max(log2(m$value+1)), length.out = 6), 2)) +
+  ggtitle("ATAC signal of peaks correlating with gene expression")
+# ggplot(m, aes(type,value)) + geom_boxplot()
+
+print(p)
+```
+
+
+
+
+
+
+

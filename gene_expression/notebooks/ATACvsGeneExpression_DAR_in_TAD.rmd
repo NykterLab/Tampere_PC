@@ -30,6 +30,7 @@ library(openxlsx)
 library(reshape2)
 library(DESeq2)
 library(rtracklayer)
+library(ggplot2)
 
 COR_THR    <- 0.5
 NCORES     <- floor(parallel::detectCores() * 0.8)
@@ -49,11 +50,19 @@ if(!exists("ann") | !exists("ann.gene")){
 }
 ```
 
+## GTRD
+
+```{r}
+gtrd_pca <- import("/bmt-data/genomics/reference/gtrd/gtrd_meta_clusters_prostate_w_names.bed")
+gtrd_all <- import("/bmt-data/genomics/reference/gtrd/gtrd_meta_clusters_all_w_names.bed")
+```
+
+
 ## DAR vs gene expression correlation matrices and distance matrices
 
 For computation method checkout `DARvGEXP_correlation_ALLvALL.R`.
 
-```{r}
+```{r, echo=FALSE, eval=FALSE}
 if(!exists("all_mrna_pearson"))   all_mrna_pearson   <- fread("dar/correlation/all_genes/combined_3_comparisons_pearson.tsv");  names(all_mrna_pearson)[1]   <- "dar_id"
 if(!exists("all_mrna_spearman"))  all_mrna_spearman  <- fread("dar/correlation/all_genes/combined_3_comparisons_spearman.tsv"); names(all_mrna_spearman)[1]  <- "dar_id"
 if(!exists("all_mrna_distance"))  all_mrna_distance  <- fread("dar/correlation/all_genes/combined_3_comparisons_distance.tsv"); names(all_mrna_distance)[1]  <- "dar_id"
@@ -66,6 +75,36 @@ if(!exists("all_prot_pearson"))   all_prot_pearson   <- fread("dar/correlation/a
 if(!exists("all_prot_spearman"))  all_prot_spearman  <- fread("dar/correlation/all_prot/combined_3_comparisons_spearman.tsv"); names(all_prot_spearman)[1]   <- "dar_id"
 
 ```
+
+```{r}
+
+fixNames <- function (table) {
+  n <- names(table)
+  n[1] <- "dar_id"
+  setnames(table, names(table), n)
+}
+
+loadTable <- function (name, path) {
+  if(!exists(name))   {
+    tmp <- fread(path)
+    fixNames(tmp)
+    assign(name, tmp, envir = .GlobalEnv)
+  }
+}
+  
+loadTable("all_mrna_pearson", "dar/correlation/all_genes/combined_3_comparisons_pearson.tsv")
+loadTable("all_mrna_spearman", "dar/correlation/all_genes/combined_3_comparisons_spearman.tsv")
+loadTable("all_mrna_distance", "dar/correlation/all_genes/combined_3_comparisons_distance.tsv")
+
+loadTable("all_mirna_pearson", "dar/correlation/all_mirna/combined_3_comparisons_pearson.tsv")
+loadTable("all_mirna_spearman", "dar/correlation/all_mirna/combined_3_comparisons_spearman.tsv")
+loadTable("all_mirna_distance", "dar/correlation/all_mirna/combined_3_comparisons_distance.tsv")
+
+loadTable("all_prot_pearson", "dar/correlation/all_prot/combined_3_comparisons_pearson.tsv")
+loadTable("all_prot_spearman", "dar/correlation/all_prot/combined_3_comparisons_spearman.tsv")
+
+```
+
 
 ## Generate mappings
 
@@ -167,15 +206,21 @@ buildMatTss <- function (dt_genes, dt_mirna, ensgids, value_name) {
   buildMat(dt_genes, dt_mirna, wid, ensgids, sprintf("%s_tss", value_name))
 }
 
-mergeGtrd <- function (dt) {
+mergeGtrd <- function (dt, gtrd) {
+  gtrd_colname <- gsub("_", " ", deparse(substitute(gtrd)))
+  
   df <- data.frame(chr   = gsub(pattern = "(chr.*)_[0-9]+_[0-9]+", replacement = "\\1", x = dt[["dar_id"]]),
                    start = gsub(pattern = "chr.*_([0-9]+)_[0-9]+", replacement = "\\1", x = dt[["dar_id"]]),
                    end   = gsub(pattern = "chr.*_[0-9]+_([0-9]+)", replacement = "\\1", x = dt[["dar_id"]]),
-                   name  = dt[["dar_id"]])
-  gr    <- makeGRangesFromDataFrame(df, starts.in.df.are.0based = FALSE, keep.extra.columns = TRUE)
+                   name  = dt[["dar_id"]],
+                   stringsAsFactors = FALSE)
+  gr    <- makeGRangesFromDataFrame(df, starts.in.df.are.0based = FALSE, keep.extra.columns = TRUE, ignore.strand = TRUE)
   olaps <- findOverlaps(gtrd, gr, type = "within")
-  tf_df <- data.frame(dar_id = gr$name[subjectHits(olaps)], gtrd_tf = gtrd$name[queryHits(olaps)])
-  tf_df <- aggregate(. ~ dar_id, data = tf_df, FUN = function(x) paste(as.character(unique(tf_df[x, "gtrd_tf"])), collapse = ", "))
+  
+  tf_df <- data.table(dar_id = gr$name[subjectHits(olaps)], gtrd_tf = gtrd$name[queryHits(olaps)])
+  # tf_df <- aggregate(. ~ dar_id, data = tf_df, FUN = function(x) paste(as.character(unique(tf_df[x, "gtrd_tf"])), collapse = ", "))
+  tf_df <- tf_df[, paste(unique(gtrd_tf), collapse = ", "), by = dar_id]
+  names(tf_df) <- c("dar_id", gtrd_colname)
   merge(dt, tf_df, by = "dar_id", all.x = TRUE)
 }
 
@@ -219,7 +264,7 @@ buildDarGenesCorrMatrix <- function (i) {
       stopifnot(all(cormat_pearson[["dar_id"]] == cormat_spearman[["dar_id"]]) & all(cormat_spearman[["dar_id"]] == distmat[["dar_id"]]))
       
       m <- Reduce(function (x, y) merge(x, y, by = c("dar_id", "gene_id")), list(cormat_pearson, cormat_spearman, distmat))
-      m[grepl(pattern = "mir", x = gene_id, ignore.case = TRUE), gene_id := mirna_map[mirna_name %in% gene_id, mirna_id]]
+      m[grepl(pattern = "mir", x = gene_id, ignore.case = TRUE), gene_id := mirna_map[match(gene_id, mirna_name, nomatch = 0), mirna_id]]
       m[,`:=`(tad_id=tad_id,
               unique_dars=tad_annotated[i, "total"],
               ngenes=length(ensgids_in_tad))]
@@ -267,7 +312,7 @@ buildDarProtCorrelationMat <- function (i) {
 
 ## Do computation
 
-```{r}
+```{r, echo=FALSE}
 load("R_data/RNA_differentiallyExpressed.RData")
 deg <- list("pc_bph"        = rownames(de_PCvBPH),
             "crpc_pc"       = rownames(de_CRPCvPC)
@@ -277,13 +322,13 @@ deg <- list("pc_bph"        = rownames(de_PCvBPH),
             )
 
 dars_log2ratio <- list("pc_bph"        = import_dars("dar/turp_corrected_log2ratio_2/with_comparison_group_col/dars_pc_bph.bed"),
-                       "crpc_pc"       = import_dars("dar/turp_corrected_log2ratio_2/with_comparison_group_col/dars_crpc_pc.bed")
-                       # "crpc_bph"      = import_dars("dar/turp_corrected_log2ratio_2/with_comparison_group_col/dars_crpc_bph.bed"),
+                       "crpc_pc"       = import_dars("dar/turp_corrected_log2ratio_2/with_comparison_group_col/dars_crpc_pc.bed"),
+                       "crpc_bph"      = import_dars("dar/turp_corrected_log2ratio_2/with_comparison_group_col/dars_crpc_bph.bed")
                        # "2_comparisons" = import_dars("dar/turp_corrected_log2ratio_2/with_comparison_group_col/combined_2_comparisons.bed"),
                        # "3_comparisons" = import_dars("dar/turp_corrected_log2ratio_2/with_comparison_group_col/combined_3_comparisons.bed")
                        )
 
-if(!exists("gtrd")) gtrd <- import("/bmt-data/genomics/reference/gtrd/gtrd_meta_clusters_prostate_w_names.bed")
+
 
 NGENES_TOT <- ncol(all_mrna_pearson) + ncol(all_mirna_pearson)
 
@@ -291,32 +336,31 @@ tad_annotated_files <- c("dar_and_tad/h1_esc/h1_esc_with_dar_info.xlsx",
                          "dar_and_tad/lncap/lncap_with_dar_info.xlsx")
 
 mapper <- list("pc_bph"        = "PCvBPH",
-               "crpc_pc"       = "CRPCvPC"
-               # "crpc_bph"      = "CRPCvBPH",
+               "crpc_pc"       = "CRPCvPC",
+               "crpc_bph"      = "CRPCvBPH"
                # "2_comparisons" = "comp2",
                # "3_comparisons" = "comp3"
                )
 
-sheet_names <- c("pc_bph", "crpc_pc")
+sheet_names <- c("pc_bph", "crpc_pc", "crpc_bph")
 for (tad_annotated_file in tad_annotated_files) {
   # sheet_names <- getSheetNames(tad_annotated_file)
-  outsheets   <- list()
+  outsheets   <- setNames(vector("list", length(sheet_names)), sheet_names)
+  
 
   for(sheet_number in seq_along(sheet_names)){
     sheet_name  <- sheet_names[sheet_number]
 
     dar_annotated <- read.csv(sprintf("tables/correlation_turp/dar/%s_turp_corrected.csv",mapper[[sheet_name]]),stringsAsFactors = FALSE)
     tad_annotated <- readWorkbook(xlsxFile = tad_annotated_file, sheet = sheet_number)
-
-    # out <- do.call(rbind, mclapply(seq(nrow(tad_annotated)), buildDarGenesCorrMatrix , mc.cores = NCORES))
+    
     out <- do.call(rbind, lapply(seq(nrow(tad_annotated)), buildDarGenesCorrMatrix))
     
     out <- as.data.table(out)
     out[, `:=`(gene_name = ann.gene[match(gene_id, ann.gene$gene_id), "gene_name"],
                de        = gene_id %in% deg[[sheet_name]],
                pearson   = round(as.numeric(pearson),  digits = 2),
-               spearman  = round(as.numeric(spearman), digits = 2))
-        ]
+               spearman  = round(as.numeric(spearman), digits = 2))]
     out[,genes := sprintf("%s (pearson: %s, spearman: %s, distance: %s, deg: %s)", gene_name, pearson, spearman, distance, de)]
     aggregated <- out[,.(number_correlating_genes    = .N,
                          total_number_genes_in_tad   = ngenes,
@@ -370,7 +414,8 @@ for (tad_annotated_file in tad_annotated_files) {
                       fdr_corrected_enrichment_score = round(fdr_corrected_enrichment_score, digits = 2))]
 
     aggregated <- merge(aggregated, dars_log2ratio[[sheet_name]], by = "dar_id")
-    aggregated <- mergeGtrd(aggregated)
+    aggregated <- mergeGtrd(aggregated, gtrd_pca)
+    aggregated <- mergeGtrd(aggregated, gtrd_all)
 
     # setcolorder(aggregated, c("tad_id", "dar_id", "dar_status",
     #                           "number_correlating_genes", "total_number_genes_in_tad", "percent_correlating_genes",
@@ -386,7 +431,7 @@ for (tad_annotated_file in tad_annotated_files) {
                               "number_correlating_genes", "total_number_genes_in_tad", "percent_correlating_genes",
                               "pvalue", "enrichment_score", "fdr_corrected_pvalue", "fdr_corrected_enrichment_score",
                               "cor_with_gene_expr_pearson", "cor_with_gene_expr_spearman",
-                              "genes", "proteins", "gtrd_tf"))
+                              "genes", "proteins", "gtrd pca", "gtrd all"))
     
 
     outsheets[[sheet_name]] <- aggregated
@@ -400,88 +445,91 @@ for (tad_annotated_file in tad_annotated_files) {
     stop("Cannot set output path.")
   }
   
-  if(!file.exists(outpath)) write.xlsx(outsheets,file = outpath)
+  write.xlsx(outsheets,file = outpath)
 }
 
 ```
 
-# Summarize results
+# Summarize results by TF
 
-## Define helpers
 ```{r}
-getGenes <- function(x, status) {
-  g <- input[grepl(x, gtrd_tf) & dar_status == status, genes]
+getGenes <- function(x, status, gtrd_set) {
+  g <- input[grepl(x, unlist(input[,..gtrd_set])) & dar_status == status, genes]
   g <- strsplit(g, "; ", fixed = TRUE)
   g <- mclapply(g, gsub, pattern = "(.*) \\(.*\\)", replacement = "\\1", mc.cores = NCORES)
   paste(sort(unique(unlist(g))), collapse = ", ")
 }
 
-getDars <- function (x, status) {
-  d <- input[grepl(x, gtrd_tf) & dar_status == status , dar_id]
+getDars <- function (x, status, gtrd_set) {
+  d <- input[grepl(x, unlist(input[,..gtrd_set])) & dar_status == status , dar_id]
   paste(d, collapse = ", ")
 }
 
-getTads <- function (x) {
-  t <- input[grep(x, gtrd_tf), tad_id]
+getTads <- function (x, gtrd_set) {
+  t <- input[grepl(x, unlist(input[,..gtrd_set])), tad_id]
   paste(unique(t), collapse = ", ")
 }
 
-findGenesUnion <- function (i) {
-  s1 <- unique(unlist(strsplit(out$genes_correlating_with_opening_dars[i], ", ")))
-  s2 <- unique(unlist(strsplit(out$genes_correlating_with_closing_dars[i], ", ")))
-  u <- union(s1, s2)
-  paste(u, collapse = ", ")
+countOccurrencies <- function (x) length(unlist(strsplit(x, ", ", fixed = TRUE)))
+
+doSummarization <- function (input, gtrd_set){
+  tf <- unlist(strsplit(input[[gtrd_set]], split = ", ", fixed = TRUE))
+  tf <- tf[!is.na(tf)]
+  tf <- unique(tf)
+  
+  out <- data.table(tf)
+  out[, `:=`(genes_correlating_with_opening_dars = sapply(tf, getGenes, status = "opening", gtrd_set = gtrd_set),
+             genes_correlating_with_closing_dars = sapply(tf, getGenes, status = "closing", gtrd_set = gtrd_set),
+             opening_dars                        = sapply(tf, getDars,  status = "opening", gtrd_set = gtrd_set),
+             closing_dars                        = sapply(tf, getDars,  status = "closing", gtrd_set = gtrd_set),
+             tads                                = sapply(tf, getTads, gtrd_set = gtrd_set)) ]
+  
+  out[, genes := sapply(seq(nrow(out)), function (i) {
+    s1 <- unique(unlist(strsplit(out$genes_correlating_with_opening_dars[i], ", ")))
+    s2 <- unique(unlist(strsplit(out$genes_correlating_with_closing_dars[i], ", ")))
+    u <- union(s1, s2)
+    paste(u, collapse = ", ")
+  })]
+  
+  out[, `:=`(ngenes_correlating_with_opening_dars = sapply(genes_correlating_with_opening_dars, countOccurrencies),
+             ngenes_correlating_with_closing_dars = sapply(genes_correlating_with_closing_dars, countOccurrencies),
+             ngenes                               = sapply(genes, countOccurrencies),
+             nopening_dars                        = sapply(opening_dars,  countOccurrencies),
+             nclosing_dars                        = sapply(closing_dars,  countOccurrencies),
+             ntads                                = sapply(tads,  countOccurrencies))]
+  
+  setcolorder(out, c("tf", "genes", "genes_correlating_with_opening_dars", "genes_correlating_with_closing_dars",
+                     "opening_dars", "closing_dars", "tads", 
+                     "ngenes", "ngenes_correlating_with_opening_dars", "ngenes_correlating_with_closing_dars",
+                     "nopening_dars", "nclosing_dars", "ntads"))
+  return(out)
 }
 
-countOccurrencies <- function (x) length(unlist(strsplit(x, ", ", fixed = TRUE)))
-```
+# tad_annotated_files <- c("dar_and_tad/h1_esc/h1_esc_tad_dar_gene_correlation.xlsx",
+#                          "dar_and_tad/lncap/lncap_tad_dar_gene_correlation.xlsx")
+tad_annotated_files <- c("dar_and_tad/lncap/lncap_tad_dar_gene_correlation.xlsx")
 
-## Do summarization by TF
-
-A bit inefficient because it is reloading previous results, but this is what happens when gluing together two scripts :)
-
-```{r}
-tad_annotated_files <- c("dar_and_tad/h1_esc/h1_esc_tad_dar_gene_correlation.xlsx",
-                         "dar_and_tad/lncap/lncap_tad_dar_gene_correlation.xlsx")
 
 for (tad_annotated_file in tad_annotated_files) {
   sheet_names <- getSheetNames(tad_annotated_file)
-  outsheets   <- list()
+  new_sheet_names <- paste(rep(sheet_names, each = 2), rep(c("pca", "all"), times = 2), sep = "_")
+  
+  outsheets   <- setNames(vector("list", length(new_sheet_names)), new_sheet_names)
 
   for(sheet_number in seq_along(sheet_names)){
     sheet_name  <- sheet_names[sheet_number]
 
     input <- readWorkbook(xlsxFile = tad_annotated_file, sheet = sheet_number)
     input <- as.data.table(input)
-
-    tf <- unlist(strsplit(input$gtrd_tf, split = ", ", fixed = TRUE))
-    tf <- tf[!is.na(tf)]
-    tf <- unique(tf)
-
-    out <- data.table(tf)
-    out[, `:=`(genes_correlating_with_opening_dars = simplify2array(mclapply(tf, getGenes, status = "opening", mc.cores = NCORES)),
-               genes_correlating_with_closing_dars = simplify2array(mclapply(tf, getGenes, status = "closing", mc.cores = NCORES)),
-               opening_dars                        = simplify2array(mclapply(tf, getDars,  status = "opening", mc.cores = NCORES)),
-               closing_dars                        = simplify2array(mclapply(tf, getDars,  status = "closing", mc.cores = NCORES)),
-               tads                                = simplify2array(mclapply(tf, getTads))) ]
     
-    out[, genes := simplify2array(mclapply(seq(nrow(out)), findGenesUnion, mc.cores = NCORES))]
+    out <- doSummarization(input, "gtrd.pca")
+    outsheets[[paste0(sheet_name, "_pca")]] <- out
     
-    out[, `:=`(ngenes_correlating_with_opening_dars = simplify2array(mclapply(genes_correlating_with_opening_dars, countOccurrencies, mc.cores = NCORES)),
-               ngenes_correlating_with_closing_dars = simplify2array(mclapply(genes_correlating_with_closing_dars, countOccurrencies, mc.cores = NCORES)),
-               ngenes                               = simplify2array(mclapply(genes, countOccurrencies, mc.cores = NCORES)),
-               nopening_dars                        = simplify2array(mclapply(opening_dars,  countOccurrencies, mc.cores = NCORES)),
-               nclosing_dars                        = simplify2array(mclapply(closing_dars,  countOccurrencies, mc.cores = NCORES)),
-               ntads                                = simplify2array(mclapply(tads,  countOccurrencies, mc.cores = NCORES)))]
-    
-    setcolorder(out, c("tf", "genes", "genes_correlating_with_opening_dars", "genes_correlating_with_closing_dars",
-                       "opening_dars", "closing_dars", "tads", 
-                       "ngenes", "ngenes_correlating_with_opening_dars", "ngenes_correlating_with_closing_dars",
-                       "nopening_dars", "nclosing_dars", "ntads"))
+    out <- doSummarization(input, "gtrd.all")
+    outsheets[[paste0(sheet_name, "_all")]] <- out
 
-    outsheets[[sheet_name]] <- out
   }
-
+  
   outpath <- if (grepl("lncap", tad_annotated_file)) {
     "dar_and_tad/lncap/lncap_tad_dar_gene_by_tf.xlsx"
   } else if (grepl("esc", tad_annotated_file)) {
@@ -490,7 +538,1147 @@ for (tad_annotated_file in tad_annotated_files) {
     stop("Cannot set output path.")
   }
 
-  if(!file.exists(outpath)) write.xlsx(outsheets,file = outpath)
+  write.xlsx(outsheets,file = outpath)
 
 }
 ```
+
+# Plot TF in DARs correlating with gene expression within TAD
+
+```{r, echo = FALSE}
+meltTables <- function(fp){  
+  require(openxlsx)
+  
+  sheet_names <- getSheetNames(fp)
+  dfs <- vector("list", length(sheet_names))
+  for (sn in seq_along(sheet_names)) {
+    
+    sheet_name <- sheet_names[sn]
+    sheet <- readWorkbook(fp, sheet=sn)
+    # sheet <- as.data.table(sheet)
+    
+    df <- subset(sheet, select = c("tf", "nopening_dars", "nclosing_dars"))
+    dfm <- melt(df)
+    dfm$variable <- ifelse(dfm$variable == "nopening_dars", "opening", "closing")
+    dfm$comparison <- gsub("(.+_.+)_.+", "\\1", sheet_name)
+    dfm$gtrd <- gsub(".+_.+_(.+)", "\\1", sheet_name)
+    
+    # totals <- dfm[,.(total = sum(value)), by = c("comparison","gtrd")]
+    # dfm <- merge(dfm, totals, by = c("comparison","gtrd"))
+    # dfm[,value := value / total]
+    
+    dfs[[sn]] <- dfm
+  }
+  
+  dfm <- do.call(rbind, dfs)
+  return(dfm)
+}
+
+plotGTRD <- function(dfm) {
+  require(cowplot)
+  
+  dfm <- base::within(dfm, {
+    # tf <- factor(tf, levels = tf[order(value[variable=="opening"] + value[variable=="closing"], decreasing = TRUE)])
+    tf = factor(tf, levels = unique(tf)[order(-sapply(unique(tf), function(x) { sum(dfm[tf == x, "value"]) }))])
+    comparison <- factor(comparison, levels = c("pc_bph", "crpc_pc"))
+  })
+  
+  comparison_names <- c(pc_bph="PCvsBPH", crpc_pc="CRPCvsPC")
+  
+  gtrd_names <- c(pca="GTRD PCA",all="GTRD ALL")
+  
+  p <- ggplot(dfm, aes(tf,value,fill=variable)) +
+    geom_bar(position="dodge", stat = "identity") +
+    xlab("") +
+    ylab("Number of DARs") +
+    # ggtitle(sprintf("%s",mapper[[sheet_name]])) +
+    facet_grid(gtrd ~ comparison, 
+               labeller = labeller(comparison = comparison_names, 
+                                   gtrd = gtrd_names)) +
+    # scale_fill_manual(name = "DAR status") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 60, hjust = 1),
+          legend.position = "bottom",
+          strip.text.x = element_text(size = 12, hjust = 0),
+          strip.background = element_blank()) +
+    guides(fill=guide_legend(title="DAR status"))
+  
+  if (length(levels(dfm$tf)) > 40) {
+    p <- p + scale_x_discrete(limits = levels(dfm$tf)[1:40])
+  }
+  
+  # if(!exists("lgnd")) lgnd <- get_legend(p)
+  # p <- p + theme(legend.position = "none")
+  
+  # pss[[sn]] <- p
+  # }
+  
+  title <- ggdraw() + draw_label(titles[[basename(fp)]], fontface='bold')
+  # plt <- plot_grid(plotlist = pss, ncol = length(pss))
+  
+  # ps[[i]] <- plot_grid(title, p, lgnd, nrow = 3, rel_heights = c(0.15, 1, 0.1))
+  plt <- plot_grid(title, p, nrow = 2, rel_heights = c(0.15, 1))
+  # }
+  
+  # P <- plot_grid(plotlist = ps, nrow = 1)
+  # plot(plt)
+  # ggsave(plt, filename = sprintf("/bmt-data/genomics/projects/atac_workdir/pictures/tfbs_dar_in_tad/DARs_in_TAD_by_TF_v2_%s.pdf", set), height = 5, width = 15)
+  return(plt)
+}
+
+plotGTRDbyDataset <- function (dfm) {
+  dataset <- unique(dfm$gtrd)
+  ps <- vector("list", length(dataset))
+  for (i in seq_along(dataset)) {
+    sbst <- subset(dfm, gtrd == dataset[i])
+    ps[[i]] <- plotGTRD(sbst)
+  }
+  return(ps)
+}
+
+# tad_annotated_files <- c("dar_and_tad/lncap/lncap_tad_dar_gene_by_tf.xlsx",
+#                          "dar_and_tad/h1_esc/h1_esc_tad_dar_gene_by_tf.xlsx")
+
+tad_annotated_files <- c("dar_and_tad/lncap/lncap_tad_dar_gene_by_tf.xlsx")
+
+
+mapper <- list(pc_bph="PCvsBPH", crpc_pc="CRPCvsPC")
+titles <- list(lncap_tad_dar_gene_by_tf.xlsx="How many TFBS are there\nin DARs correlating with gexp within LNCaP TADs?", 
+               h1_esc_tad_dar_gene_by_tf.xlsx="H1 ESC TAD")
+
+ps <- vector("list", length(tad_annotated_files))
+
+
+# for (i in seq_along(tad_annotated_files)) {
+i <- 1
+fp <- tad_annotated_files[[i]]
+
+dfm <- meltTables(fp)
+
+p1 <- plotGTRD(dfm)
+ggsave(p1,filename = "pictures/tfbs_dar_in_tad/TfbsByGTRD_together.pdf", width = 15)
+
+p2 <- plotGTRDbyDataset(dfm)
+library(gridExtra)
+ggsave(marrangeGrob(p2, ncol=1,nrow=1),filename = "pictures/tfbs_dar_in_tad/tfbsByGTRD_separate.pdf", width = 15)
+# p2 <- plotGTRD(fp)
+# 
+# lgnd <- get_legend(p1)
+# p1 <- p1 + theme(legend.position = "none")
+# p2 <- p2 + theme(legend.position = "none")
+
+
+```
+
+# Check correlation with known oncogenes and tumor suppressors
+
+```{r}
+# prostate cancer
+pca_related_genes <- c("KLK3",# aka PSA
+                       "CDH1", "FOXA1", "CDKN1B", "ATM", "NKX3-1", "MED12", "PTEN", "RB1","AR")
+interesting_genes <- pca_related_genes
+
+# oncogenes
+general_oncogenes <- c("ABL1", "ABL2", "AKT1", "ATF1", "BCL11A", "BCL2", "BCL3", "BCL6", "BCR", "BRAF", "CARD11",
+                       "CBLB", "CCND1", "CCND2", "CCND3", "CDX2", "CTNNB1", "DDB2", "DDIT3", "DDX6", "DEK", "EGFR",
+                       "ELK4", "ERBB2", "ETV4", "ETV6", 
+                       "MECOM",  #"EVI1", 
+                       "EWSR1", "FEV", "FGFR1", "FGFR1OP", "FGFR2", "FUS", "GOLGA5", "GOPC", "HMGA1", "HMGA2", "HRAS",
+                       "IRF4", "JUN", "KIT", "KRAS", "LCK", "LMO2", "MAF", "MAFB", "MAML2", "MDM2", "MET", "MITF", 
+                       "KMT2A", # "MLL", 
+                       "MPL", "MYB", "MYC", 
+                       "MYCL", # "MYCL1", 
+                       "MYCN", "NCOA4","NFKB2", "NRAS", "NTRK1", "NUP214", "PAX8", "PDGFB", "PIK3CA", "PIM1", "PLAG1",
+                       "PPARG", "PTPN11","RAF1", "REL", "RET", "ROS1", "SMO", "SS18", "TCL1A", "TET2", "TFG", "TLX1",
+                       "TPR", "USP6")
+interesting_genes <- c(interesting_genes, general_oncogenes)
+
+# tumor suppressor
+general_tumor_suppressor <- c("APC", "ARHGEF12", "ATM", "BCL11B", "BLM", "BMPR1A", "BRCA1", "BRCA2", "CARS",
+                       "CBFA2T3", "CDH1", "CDH11", "CDK6", "CDKN2C", "CEBPA", "CHEK2", "CREB1", "CREBBP", "CYLD", "DDX5",
+                       "EXT1", "EXT2", "FBXW7", "FH", "FLT3", "FOXP1", "GPC3", "IDH1", "IL2", "JAK2", "MAP2K4", "MDM4",
+                       "MEN1", "MLH1", "MSH2", "NF1", "NF2", "NOTCH1", "NPM1", "NR4A3", "NUP98", "PALB2", "PML", "PTEN",
+                       "RB1", "RUNX1", "SDHB", "SDHD", "SMARCA4", "SMARCB1", "SOCS1", "STK11", "SUFU", "SUZ12", "SYK",
+                       "TCF3", "TNFAIP3", "TP53", "TSC1", "TSC2", "VHL", "WRN", "WT1")
+interesting_genes <- c(interesting_genes, general_tumor_suppressor)
+
+# chromatin remodeling
+chromatin_remodelers <- c("BRDT", "CHD1", "CHD2", "CHD3", "CHD4", "ARID3A", "HDAC1", "HDAC2", "HELLS",
+                       "CITED1", "ARID4A", "BRD2", "SMARCA1", "SMARCA2", "HLTF", "SMARCA4", "SMARCB1", "SMARCC1",
+                       "SMARCC2", "SMARCD1", "SMARCD2", "SMARCD3", "SMARCE1", "TAPBP", "BRD3", "ARID1A", "SMARCA5", 
+                       "HAT1", "HDAC3", 
+                       "KAT2B",  # "PCAF", 
+                       "BAZ1B", "CDYL", "HDAC9", "HDAC4", "HDAC6", "HDAC5", "CITED2", "ARID3B",
+                       "ARID5A", "BRD8", "BAZ2A", "BAZ1A", "BRD4", "BRD1", "CHD5", "BRD7", "BAZ2B", "SMARCAL1", 
+                       "HDAC7",  # "HDAC7A",
+                       "ARID4B", "CHRAC1", "CHD7", "HDAC8", "ARID1B", "CHD8", "BRD9", "HDAC11", "CHD9", "HDAC10", 
+                       "KAT8",  # "MYST1",
+                       "ARID5B", "CHD6", "CITED4")
+interesting_genes <- c(interesting_genes, chromatin_remodelers)
+
+interesting_genes <- unique(interesting_genes)
+```
+
+```{r}
+fn <- "dar_and_tad/lncap/lncap_tad_dar_gene_correlation.xlsx"
+
+sheets <- getSheetNames(fn)
+
+parseGeneNames <- function(v) {
+  L <- lapply(v, FUN = function(x) unlist(strsplit(x, "; ", fixed=TRUE)))
+  do.call(rbind, mclapply(seq_along(L), FUN = function(i) {
+    each <- L[[i]]
+    data.frame(dar_id    = rep(names(L)[i], length(each)),
+               gene_name = gsub("(.+) \\(.+", "\\1", each),
+               pearson   = gsub(".+ \\(pearson: (.+?),.+\\)", "\\1", each),
+               spearman  = gsub(".+ \\(pearson: .+?, spearman: (.+?), .+\\)", "\\1", each),
+               distance  = as.numeric(gsub(".+ \\(pearson: .+?, spearman: .+?, distance: (.+?), deg: .+\\)", "\\1", each)),
+               deg       = gsub(".+ \\(pearson: .+?, spearman: .+?, distance: .+?, deg: (.+)\\)", "\\1", each))
+  }, mc.cores = NCORES))
+}
+
+assignGeneClass <- function(n) {
+  sapply(n, function(x) {
+    if (x %in% pca_related_genes) {
+      return("Prostate Cancer gene")
+    } else if (x %in% general_oncogenes) {
+      return("Oncogene")
+    } else if (x %in% general_tumor_suppressor) {
+      return("Tumor suppressor gene")
+    } else if (x %in% chromatin_remodelers) {
+      return("Chromatin remodeler")
+    }
+  })
+}
+
+olist <- vector("list", length(sheets))
+olist <- setNames(olist, sheets)
+for (i in seq_along(sheets)){
+  dat <- readWorkbook(fn, sheet = i)  
+  v <- setNames(dat$genes, dat$dar_id)
+  df <- parseGeneNames(v)
+  df <- subset(df, gene_name %in% interesting_genes)
+  cat(sheets[i], "genes:", length(unique(df$gene_name)), "dars:", length(unique(df$dar_id)), "\n")
+
+  df$gene_class <- assignGeneClass(df$gene_name)
+  print(table(df$gene_class))
+  
+  hist(df$distance, main=sheets[i])
+  abline(v = mean(df$distance), lwd=2, col="dodgerblue")
+  
+  olist[[i]] <- df
+}
+
+write.xlsx(olist, "dar_and_tad/lncap/lncap_tad_dar_gene_correlation_interesting_genes.xlsx")
+```
+# Assess AR co-locating TFBS
+
+Compute background for all prostate sites and all gtrd sites
+
+```{bash}
+cd /bmt-data/genomics/reference/gtrd
+cat gtrd_meta_clusters_prostate_w_names.bed | awk '{print $4}' | sort |uniq -c |sort -k1,1n 
+cat gtrd_meta_clusters_all_w_names.bed | awk '{print $4}' | sort |uniq -c |sort -k1,1n
+```
+
+```{r}
+getSites <- function (v, pattern = "^AR$") {
+  L <- lapply(v, function(each) unlist(strsplit(each, ", ")))
+  sapply(L, function(each) any(grepl(pattern, each)))
+}
+
+getTf <- function(ii, sites_with_ar, tfname = "AR") {
+    tf <- unlist(strsplit(unlist(sites_with_ar[ii, 1]), ", "))
+    tf <- tf[-which(tf == tfname)]
+    return(data.table(tf = tf, 
+               dar_status = rep(sites_with_ar[ii, dar_status], length(tf)),
+               dar_id = rep(sites_with_ar[ii, dar_id], length(tf))))
+  }
+
+doPlot <- function(dts, selected_column, selected_gtrd_set) { # , outfile1) { # outfile2) {
+  
+  # dts <- do.call(rbind, dts)  
+  dts <- dts[gtrd_set == selected_gtrd_set]
+
+  keep <- c(tf="tf", count=selected_column, dar_status="dar_status", comparison="comparison", gtrd_set="gtrd_set")
+  dts <- dts[,..keep]
+  names(dts) <- names(keep)
+  
+  dts <- as.data.frame(dts)
+  dts <- base::within(dts, {
+    tf <- factor(tf, levels=unique(tf)[order(-sapply(unique(tf), function(x) sum(dts[tf == x, "count"])))])
+    comparison <- factor(comparison, levels = c("pc_bph", "crpc_pc"))
+    dar_status <- factor(dar_status, levels = c("opening", "closing"))
+  })
+  if (length(levels(dts$tf)) > 40) {
+    dts <- subset(dts, tf %in% levels(dts$tf)[1:40])
+  }
+
+  comparison_labels <- c(pc_bph="PCvBPH", crpc_pc="CRPCvPC")
+  dar_status_label <- c(opening="Opening DAR", closing="Closing DAR")
+  
+  p <- ggplot(dts, aes(tf, count)) +
+    geom_bar(stat="identity") + 
+    facet_grid(dar_status ~ comparison, labeller = labeller(dar_status = dar_status_label, comparison = comparison_labels)) +
+    theme_minimal() +
+    ggtitle(sprintf("Which TFBS are represented in DARs carrying AR binding site\nand correlating with gexp? - GTRD %s", base::toupper(selected_gtrd_set))) +
+    theme(axis.text.x = element_text(angle = 60, hjust = 1),
+          strip.text.x = element_text(size = 12, hjust = 0),
+          strip.text.y = element_text(size = 12),
+          strip.background = element_blank())
+  
+  return(p)
+}
+
+makeDataTable <- function (dt, tfname = "AR") {
+  
+  dt_gtrd_tf <- do.call(rbind, mclapply(seq(nrow(dt)), getTf, sites_with_ar = dt, tfname = tfname, mc.cores = NCORES))
+  res <- dt_gtrd_tf[,.(count = .N, dars = paste(dar_id, collapse=", ")), by = c("dar_status","tf")]
+  
+  # compute normalization factors
+  res[,`:=`(total_unique_dars_per_dar_status_per_comparison = length(unique(unlist(strsplit(dars, ", "))))), by = "dar_status"] # sum by opening/closing
+  res[,`:=`(total_unique_dars = length(unique(unlist(strsplit(dars, ", ")))))] # get total number of dars in comparison
+  
+  # perform normalization
+  res[,`:=`(count_normalized_by_dars_per_comparison = count / total_unique_dars_per_dar_status_per_comparison,
+            count_normalized_by_total_comparison = count / total_unique_dars)]
+  
+  return(res)  
+}
+
+makePlot <- function (dts, normname, outfile) {
+  require(gridExtra)
+  
+  outdir <- "/bmt-data/genomics/projects/atac_workdir/pictures/tfbs_dar_in_tad/"
+  
+  if (!dir.exists(outdir)) {
+    dir.create(outdir)
+  } 
+  
+  p <- list(PCA=doPlot(dts, normname, "pca"), ALL= doPlot(dts, normname, "all"))
+  ggsave(plot = marrangeGrob(grobs = lapply(p, ggplotGrob), nrow = 1, ncol = 1), 
+         filename = file.path(outdir, outfile),
+         height = 5, width = 15)
+}
+```
+
+```{r}
+fp <- "dar_and_tad/lncap/lncap_tad_dar_gene_correlation.xlsx"
+sheet_names <- getSheetNames(fp)
+#dts_pca <- vector("list", length(sheets))
+#dts_all <- vector("list", length(sheets))
+dts <- vector("list", length(sheets))
+for (i in seq_along(sheet_names)) {
+  sheet <- readWorkbook(fp, sheet=i)
+  sheet <- as.data.table(sheet)
+
+  ## PROCESS GTRD PCA
+  sites_with_ar_gtrd_pca <- sheet[getSites(gtrd.pca), .(gtrd.pca, dar_status, dar_id)]
+  d1 <- makeDataTable(sites_with_ar_gtrd_pca)
+  d1$comparison <- sheet_names[i]
+  d1$gtrd_set <- "pca"
+  
+  ## PROCESS GTRD ALL
+  sites_with_ar_gtrd_all <- sheet[getSites(gtrd.all), .(gtrd.all, dar_status, dar_id)]
+  d2 <- makeDataTable(sites_with_ar_gtrd_all)
+  d2$comparison <- sheet_names[i]
+  d2$gtrd_set <- "all"
+  
+  dts[[i]] <- rbind(d1, d2)
+}
+
+dts <- do.call(rbind, dts)
+makePlot(dts, normname = "count",  outfile = "TF_in_DARs_with_ARBS_raw_counts.pdf")
+makePlot(dts, normname = "count_normalized_by_dars_per_comparison", outfile =  "TF_in_DARs_with_ARBS_normByDarStatusAndComparison.pdf")
+makePlot(dts, normname = "count_normalized_by_total_comparison", outfile =  "TF_in_DARs_with_ARBS_normByComparison.pdf")
+
+```
+
+### Compute difference by tf
+
+```{r}
+
+dtsm <- melt(dts, 
+             id.vars = c("tf", "comparison", "dar_status", "gtrd_set"), 
+             measure.vars = "count_normalized_by_dars_per_comparison")
+
+keys <- c("tf", "comparison", "dar_status", "gtrd_set")
+merge_keys <- keys[-which(keys == "dar_status")]
+dtsm[,.(value), by = keys]
+dtsm <- merge(dtsm[dar_status == "opening", .(opening_value=value), by = merge_keys], 
+              dtsm[dar_status == "closing", .(closing_value=value), by = merge_keys], 
+              by = merge_keys)
+dtsm[,normalized_difference := opening_value - closing_value]
+# dtsm <- dtsm[order(tf, sum(abs(normalized_difference)))]
+
+ordering <- dtsm[, .(sum=sum(abs(normalized_difference))), by = tf]
+ordering[,tf := factor(tf, levels = tf[order(-sum)])]
+dtsm[,`:=`(tf=factor(tf, levels = rev(levels(ordering$tf))),
+           comparison=factor(comparison,levels=c("pc_bph", "crpc_pc")))]
+
+p <- ggplot(dtsm, aes(x = comparison, y= tf, fill=normalized_difference)) +
+  geom_raster() + 
+  facet_wrap(. ~ gtrd_set, labeller = labeller(gtrd_set = c(all="GTRD ALL", pca="GTRD PCA"))) +
+  theme_bw() +
+  ylab("") + xlab("") + 
+  ggtitle("Do DARs carrying ARBS open or close between comparisons\nBreakdown by co-occurring TFBS") +
+  scale_x_discrete(labels=c("crpc_pc"="CRPCvsPC", "pc_bph"="PCvsBPH")) +
+  scale_y_discrete(breaks = rev(levels(dtsm$tf))) +
+  scale_fill_distiller(palette = "Spectral", direction = 1) +
+  theme(strip.text.x = element_text(size = 12, hjust = 0),
+        strip.text.y = element_text(size = 12),
+        strip.background = element_blank(),
+        legend.position = "top",
+        legend.text = element_text(angle=60,hjust=1),
+        axis.text.x = element_text(size=14))
+ggsave(filename = "/bmt-data/genomics/projects/atac_workdir/pictures/tfbs_dar_in_tad/differenceByTf_raster.pdf", plot = p, height = 15)
+
+ordering <- dtsm[, .(sum=sum(abs(normalized_difference), na.rm=T)), by = tf]
+ordering[,tf := factor(tf, levels = tf[order(-sum)])]
+dtsm[,`:=`(tf=factor(tf, levels = levels(ordering$tf)),
+           comparison=factor(comparison,levels=c("pc_bph", "crpc_pc")))]
+dtsm <- subset(dtsm, tf %in% levels(tf)[1:50])
+
+mypal <- colorRampPalette(c("green", "black", "red"))
+p <- ggplot(dtsm, aes(tf, normalized_difference, fill=normalized_difference)) +
+  geom_bar(stat="identity", color = "grey30", position = "dodge") + 
+  geom_hline(yintercept = 0) +
+  scale_fill_distiller(palette = "Spectral", direction = 1) +
+  facet_grid(gtrd_set ~ comparison, 
+             labeller = labeller(gtrd_set = c(all="GTRD ALL", pca="GTRD PCA"), 
+                                 comparison=c(pc_bph="PCvsBPH", crpc_pc="CRPCvsPC"))) +
+  theme_bw() +
+  ggtitle("Do DARs carrying ARBS open or close between comparison?\nBreakdown by co-occurring TFBS as number_opening_dars - number_closing_dars") +
+  theme(strip.text.x = element_text(size = 12, hjust = 0),
+        strip.text.y = element_text(size = 12),
+        # strip.background = element_blank(),
+        axis.text.x = element_text(angle=60, hjust=1))
+ggsave(filename = "/bmt-data/genomics/projects/atac_workdir/pictures/tfbs_dar_in_tad/differenceByTf_bars.pdf", plot = p, width = 15)
+
+```
+
+## Export to bed
+
+```{r}
+library(data.table)
+library(GenomicRanges)
+
+dars_file <- "dar_and_tad/lncap/lncap_tad_dar_gene_correlation.xlsx"
+sheet_names <- getSheetNames(dars_file)
+for (sn in seq_along(sheet_names)) {
+  sheet <- readWorkbook(dars_file, sheet = sn)
+  sheet <- as.data.table(sheet)
+  
+  ar_sites_gtrd_pca <- sheet[getSites(gtrd.pca), .(dar_id)]
+  ar_sites_gtrd_all <- sheet[getSites(gtrd.all), .(dar_id)]
+  
+  ar_sites_gtrd_pca <- ar_sites_gtrd_pca[,.(chrom=gsub("(chr.+)_[0-9]+_[0-9]+", "\\1", dar_id),
+                                            start=gsub("chr.+_([0-9]+)_[0-9]+", "\\1", dar_id),
+                                            end=gsub("chr.+_[0-9]+_([0-9]+)", "\\1", dar_id))]
+  ar_sites_gtrd_all <- ar_sites_gtrd_all[,.(chrom=gsub("(chr.+)_[0-9]+_[0-9]+", "\\1", dar_id),
+                                            start=gsub("chr.+_([0-9]+)_[0-9]+", "\\1", dar_id),
+                                            end=gsub("chr.+_[0-9]+_([0-9]+)", "\\1", dar_id))]
+  
+  ar_sites_gtrd_pca_gr <- makeGRangesFromDataFrame(ar_sites_gtrd_pca)
+  ar_sites_gtrd_all_gr <- makeGRangesFromDataFrame(ar_sites_gtrd_all)
+  
+  rtracklayer::export(ar_sites_gtrd_pca_gr, sprintf("dar_and_tad/lncap/ar_sites_gtrd_pca_%s.bed", sheet_names[sn]))
+  rtracklayer::export(ar_sites_gtrd_all_gr, sprintf("dar_and_tad/lncap/ar_sites_gtrd_all_%s.bed", sheet_names[sn]))
+}
+```
+
+# Assess FOXA1 co-locating TFBS
+
+```{r}
+fp <- "dar_and_tad/lncap/lncap_tad_dar_gene_correlation.xlsx"
+sheet_names <- getSheetNames(fp)
+dts <- vector("list", length(sheets))
+for (i in seq_along(sheet_names)) {
+  sheet <- readWorkbook(fp, sheet=i)
+  sheet <- as.data.table(sheet)
+
+  ## PROCESS GTRD PCA
+  sites_with_ar_gtrd_pca <- sheet[getSites(gtrd.pca, "^FOXA1$"), .(gtrd.pca, dar_status, dar_id)]
+  d1 <- makeDataTable(sites_with_ar_gtrd_pca, "FOXA1")
+  d1$comparison <- sheet_names[i]
+  d1$gtrd_set <- "pca"
+  
+  ## PROCESS GTRD ALL
+  sites_with_ar_gtrd_all <- sheet[getSites(gtrd.all, "^FOXA1$"), .(gtrd.all, dar_status, dar_id)]
+  d2 <- makeDataTable(sites_with_ar_gtrd_all, "FOXA1")
+  d2$comparison <- sheet_names[i]
+  d2$gtrd_set <- "all"
+  
+  dts[[i]] <- rbind(d1, d2)
+}
+
+dts <- do.call(rbind, dts)
+makePlot(dts, normname = "count",  outfile = "TF_in_DARs_with_FOXA1bs_raw_counts.pdf")
+makePlot(dts, normname = "count_normalized_by_dars_per_comparison", outfile =  "TF_in_DARs_with_FOXA1bs_normByDarStatusAndComparison.pdf")
+makePlot(dts, normname = "count_normalized_by_total_comparison", outfile =  "TF_in_DARs_with_FOXA1bs_normByComparison.pdf")
+
+```
+
+# Figure 5A, 5B, 5C, 5D (binary heatmaps and oncoprints)
+
+```{r}
+getTf <- function (v) {
+  ret <- unique(unlist(strsplit(v, ", ")))
+  ret[!is.na(ret)]
+}
+
+fp <- "dar_and_tad/lncap/lncap_tad_dar_gene_correlation.xlsx"
+# sheet_names <- getSheetNames(fp)
+sheet_names <- c("pc_bph", "crpc_pc")
+
+# dars_fp <- "dar/turp_corrected_log2ratio_2/with_comparison_group_col/combined_2_comparisons.bed"
+# dars <- fread(dars_fp)
+# setnames(dars, c("chrom", "start", "end", "abs_med_diff", "log2_ratio", "u_stat", "p_value"))
+# dars[,dar_id:=paste(chrom,start,end,sep="_")]
+
+pc_bph <- fread("dar/turp_corrected_log2ratio_2/no_overlaps/dars_pc_bph_no_overlap.bed")
+pc_bph[,`:=`(dar_id = paste(chrom, start,end, sep="_"),
+             comparison="pc_bph",
+             med_pc = NULL,
+             med_bph = NULL)]
+
+crpc_pc <- fread("dar/turp_corrected_log2ratio_2/no_overlaps/dars_crpc_pc_no_overlap.bed")
+crpc_pc[,`:=`(dar_id = paste(chrom, start,end, sep="_"),
+              comparison="crpc_pc",
+              med_pc = NULL,
+              med_crpc = NULL)]
+
+k_pc_bph <- ! pc_bph$dar_id %in% crpc_pc$dar_id
+k_crpc_pc <- ! crpc_pc$dar_id %in% pc_bph$dar_id
+
+pc_bph <- pc_bph[k_pc_bph]
+crpc_pc <- crpc_pc[k_crpc_pc]
+
+dars <- rbind(pc_bph, crpc_pc)
+
+
+tf <- list(pca=vector("list", length(sheet_names)), 
+           all=vector("list", length(sheet_names)))
+
+sheets <- setNames(vector("list",2), sheet_names)
+for (i in seq_along(sheet_names)) {
+  sheet <- readWorkbook(fp, sheet=i)
+  sheet <- as.data.table(sheet)
+  sheets[[sheet_names[i]]] <- sheet
+  
+  # dars <- sheet$dar_id
+  tf[["pca"]][[i]] <- getTf(sheet$gtrd.pca)
+  tf[["all"]][[i]] <- getTf(sheet$gtrd.all)
+}
+
+tf <- lapply(tf, function(each) unique(do.call(c,each)))
+
+m1 <- matrix(0, nrow(dars), length(tf[["pca"]]), dimnames = list(dars$dar_id, tf[["pca"]]))
+m2 <- matrix(0, nrow(dars), length(tf[["all"]]), dimnames = list(dars$dar_id, tf[["all"]]))
+
+tot_correlating_dars <- 0
+for (i in seq_along(sheets)) {
+  sheet <- sheets[[i]]
+  correlating_in_sheet <- 0
+  
+  for (ii in seq(nrow(sheet))) {
+    # dar <- dars[ii]
+    row <- sheet[ii, ]
+    
+    cur_dar_id <- row$dar_id
+    tot_correlating_dars <- tot_correlating_dars + 1
+    cur_tf_pca <- getTf(row$gtrd.pca)
+    cur_tf_all <- getTf(row$gtrd.all)
+    
+    if (length(cur_tf_pca)>0){
+      m1[rownames(m1) == cur_dar_id, cur_tf_pca] <- 1
+    }
+    if(length(cur_tf_all) >0){
+      m2[rownames(m1) == cur_dar_id, cur_tf_all] <- 1
+    }
+    if (length(cur_tf_pca)>0 | length(cur_tf_all) >0){ 
+      correlating_in_sheet <- correlating_in_sheet + 1
+    }
+  }
+  
+  cat(sheet_names[i], correlating_in_sheet,"\n")
+}
+cat("tot", tot_correlating_dars, "\n")
+
+m1 <- m1[rowSums(m1) != 0,]
+m2 <- m2[rowSums(m2) != 0,]
+
+m1 <- m1[!duplicated(rownames(m1)),]
+m2 <- m2[!duplicated(rownames(m2)),]
+#   
+```
+
+```{r}
+rowannot <- dars[,.(dar_id=dar_id, 
+                    comparison=as.factor(comparison_group),
+                    status=ifelse(log2_ratio > 0, "opening", "closing"))]
+
+annot_m1 <- as.data.frame(rowannot[match(rownames(m1), dar_id),])
+rownames(annot_m1) <- rownames(m1)
+annot_m1$dar_id <- NULL
+
+annot_m2 <- as.data.frame(rowannot[match(rownames(m2), dar_id),])
+rownames(annot_m2) <- rownames(m2)
+annot_m2$dar_id <- NULL
+
+# pheatmap(m1, annotation_row = annot_m1,
+#          clustering_distance_cols = "binary",
+#          clustering_distance_rows = "binary",
+#          color = c("blue", "yellow"),
+#          show_rownames = FALSE, show_colnames = TRUE,
+#          filename = sprintf("pictures/combined2comparison_dar_in_tad_gtrdPca_%s.png", sheet_names[i]))
+# 
+# pheatmap(m2, annotation_row = annot_m2,
+#          clustering_distance_cols = "binary",
+#          clustering_distance_rows = "binary",
+#          color = c("blue", "yellow"),
+#          show_rownames = FALSE, show_colnames = FALSE,
+#          filename = sprintf("pictures/combined2comparison_dar_in_tad_gtrdAll_%s.png", sheet_names[i]))
+
+# }
+
+```
+
+```{r}
+library(ComplexHeatmap)
+m1_oncoprint <- t(apply(m1, c(1,2), function(x) ifelse(x == 1, "present", "")))
+m2_oncoprint <- t(apply(m2, c(1,2), function(x) ifelse(x == 1, "present", "")))
+
+convertOncoprintMat <- function (oncoprint, annot) {
+  for (i in seq(ncol(oncoprint))) {
+    rows <- which(oncoprint[,i] == "present")
+    oncoprint[rows, i] <- as.character(annot[colnames(oncoprint)[i], "comparison"])
+  }
+  return(oncoprint)
+}
+
+m1_oncoprint <- convertOncoprintMat(m1_oncoprint, annot_m1)
+m2_oncoprint <- convertOncoprintMat(m2_oncoprint, annot_m2)
+
+m1_oncoprint_opening <- m1_oncoprint[,rownames(annot_m1)[annot_m1$status == "opening"]]
+m1_oncoprint_closing <- m1_oncoprint[,rownames(annot_m1)[annot_m1$status == "closing"]]
+
+m2_oncoprint_opening <- m2_oncoprint[,rownames(annot_m2)[annot_m2$status == "opening"]]
+m2_oncoprint_closing <- m2_oncoprint[,rownames(annot_m2)[annot_m2$status == "closing"]]
+
+m1_oncoprint_opening_pc_bph <- m1_oncoprint[,rownames(annot_m1)[annot_m1$status == "opening" 
+                                                                & annot_m1$comparison == "pc_bph"]]
+
+m1_oncoprint_closing_pc_bph <- m1_oncoprint[,rownames(annot_m1)[annot_m1$status == "closing" 
+                                                                & annot_m1$comparison == "pc_bph"]]
+
+m1_oncoprint_opening_crpc_pc <- m1_oncoprint[,rownames(annot_m1)[annot_m1$status == "opening" 
+                                                                & annot_m1$comparison == "crpc_pc"]]
+
+m1_oncoprint_closing_crpc_pc <- m1_oncoprint[,rownames(annot_m1)[annot_m1$status == "closing" 
+                                                                & annot_m1$comparison == "crpc_pc"]]
+
+
+colors <- c(present="darkgoldenrod1", absent="grey90", pc_bph="orangered", crpc_pc="orangered")
+
+alter_fun = list(
+    background = function(x, y, w, h) 
+        grid.rect(x, y, w*0.9, h*0.9, gp = gpar(fill = colors["absent"], col = NA)),
+    present = function(x, y, w, h) 
+        grid.rect(x, y, w*0.9, h*0.9, gp = gpar(fill = colors["present"], col = NA)),
+    pc_bph = function(x, y, w, h) 
+        grid.rect(x, y, w*0.9, h*0.9, gp = gpar(fill = colors["pc_bph"], col = NA)),
+    crpc_pc = function(x, y, w, h) 
+      grid.rect(x, y, w*0.9, h*0.9, gp = gpar(fill = colors["crpc_pc"], col = NA))
+
+    # blue rectangles
+    # absent = function(x, y, w, h) 
+    #     grid.rect(x, y, w*0.9, h*0.9, gp = gpar(fill = colors["absent"], col = NA))
+    # # dots
+    # intronic = function(x, y, w, h) 
+    #     grid.points(x, y, pch = 16),
+    # # crossed lines
+    # exonic = function(x, y, w, h) {
+    #     grid.segments(x - w*0.4, y - h*0.4, x + w*0.4, y + h*0.4, gp = gpar(lwd = 2))
+    #     grid.segments(x + w*0.4, y - h*0.4, x - w*0.4, y + h*0.4, gp = gpar(lwd = 2))
+    # }
+)
+
+heatmap_legend_param <- list(title = "Biding site", 
+                             at = c("Present", "Absent")
+                             # labels = c("Deep deletion", "Amplification", "Mutation")
+                             )
+pdf_height <- 12
+pdf_width <- 12
+
+#####################
+# GTRD PCA ALL DARS #
+#####################
+pdf("pictures/oncoprint/gtrdPca_all.pdf", height = pdf_height, width = pdf_width)
+
+comparison <- setNames(annot_m1$comparison, rownames(annot_m1))
+comparison <- comparison[match(colnames(m1_oncoprint), names(comparison), nomatch = 0)]
+
+status <- setNames(annot_m1$status, rownames(annot_m1))
+status <- status[match(colnames(m1_oncoprint), names(status), nomatch = 0)]
+  
+top_annotation <- HeatmapAnnotation(status = status, comparison = comparison) 
+
+
+oncoPrint(m1_oncoprint,
+          alter_fun = alter_fun,
+          col = colors,
+          show_row_names = TRUE,
+          show_row_barplot = FALSE,
+          show_column_names = FALSE,
+          remove_empty_columns = TRUE,
+          top_annotation = top_annotation
+          )
+dev.off()
+
+##########################################
+# GTRD PCA OPENING DARS BOTH COMPARISONS #
+##########################################
+pdf("pictures/oncoprint/gtrdPca_opening.pdf", height = pdf_height, width = pdf_width)
+
+comparison <- setNames(annot_m1$comparison, rownames(annot_m1))
+comparison <- comparison[match(colnames(m1_oncoprint_opening), names(comparison), nomatch = 0)]
+top_annotation <- HeatmapAnnotation(comparison = comparison)
+
+oncoPrint(m1_oncoprint_opening, 
+          alter_fun = alter_fun,
+          col = colors, 
+          show_row_names = TRUE, 
+          show_row_barplot = FALSE,
+          show_column_names = FALSE,
+          remove_empty_columns = TRUE,
+          top_annotation = top_annotation
+          )
+dev.off()
+
+##########################################
+# GTRD PCA CLOSING DARS BOTH COMPARISONS #
+##########################################
+pdf("pictures/oncoprint/gtrdPca_closing.pdf", height = pdf_height, width = pdf_width)
+
+comparison <- setNames(annot_m1$comparison, rownames(annot_m1))
+comparison <- comparison[match(colnames(m1_oncoprint_closing), names(comparison), nomatch = 0)]
+top_annotation <- HeatmapAnnotation(comparison = comparison)
+
+oncoPrint(m1_oncoprint_closing, 
+          alter_fun = alter_fun,
+          col = colors, 
+          show_row_names = TRUE, 
+          show_row_barplot = FALSE,
+          show_column_names = FALSE,
+          remove_empty_columns = TRUE,
+          top_annotation = top_annotation
+          )
+dev.off()
+
+################################
+# GTRD PCA OPENING DARS PC_BPH #
+################################
+pdf("pictures/oncoprint/gtrdPca_opening_pc_bph.pdf", height = pdf_height, width = pdf_width)
+
+comparison <- setNames(annot_m1$comparison, rownames(annot_m1))
+comparison <- comparison[match(colnames(m1_oncoprint_opening_pc_bph), names(comparison), nomatch = 0)]
+top_annotation <- HeatmapAnnotation(comparison = comparison)
+
+oncoPrint(m1_oncoprint_opening_pc_bph, 
+          alter_fun = alter_fun,
+          col = colors, 
+          show_row_names = TRUE, 
+          show_row_barplot = FALSE,
+          show_column_names = FALSE,
+          remove_empty_columns = TRUE,
+          # top_annotation = top_annotation
+          )
+dev.off()
+
+################################
+# GTRD PCA CLOSING DARS PC_BPH #
+################################
+pdf("pictures/oncoprint/gtrdPca_closing_pc_bph.pdf", height = pdf_height, width = pdf_width)
+
+comparison <- setNames(annot_m1$comparison, rownames(annot_m1))
+comparison <- comparison[match(colnames(m1_oncoprint_closing_pc_bph), names(comparison), nomatch = 0)]
+top_annotation <- HeatmapAnnotation(comparison = comparison)
+
+oncoPrint(m1_oncoprint_closing_pc_bph, 
+          alter_fun = alter_fun,
+          col = colors, 
+          show_row_names = TRUE, 
+          show_row_barplot = FALSE,
+          show_column_names = FALSE,
+          remove_empty_columns = TRUE,
+          # top_annotation = top_annotation
+          )
+dev.off()
+
+#################################
+# GTRD PCA OPENING DARS CRPC_PC #
+#################################
+pdf("pictures/oncoprint/gtrdPca_opening_crpc_pc.pdf", height = pdf_height, width = pdf_width)
+
+comparison <- setNames(annot_m1$comparison, rownames(annot_m1))
+comparison <- comparison[match(colnames(m1_oncoprint_opening_crpc_pc), names(comparison), nomatch = 0)]
+top_annotation <- HeatmapAnnotation(comparison = comparison)
+
+oncoPrint(m1_oncoprint_opening_crpc_pc, 
+          alter_fun = alter_fun,
+          col = colors, 
+          show_row_names = TRUE, 
+          show_row_barplot = FALSE,
+          show_column_names = FALSE,
+          remove_empty_columns = TRUE,
+          # top_annotation = top_annotation
+          )
+dev.off()
+
+#################################
+# GTRD PCA CLOSING DARS CRPC_PC #
+#################################
+pdf("pictures/oncoprint/gtrdPca_closing_crpc_pc.pdf", height = pdf_height, width = pdf_width)
+
+comparison <- setNames(annot_m1$comparison, rownames(annot_m1))
+comparison <- comparison[match(colnames(m1_oncoprint_closing_crpc_pc), names(comparison), nomatch = 0)]
+top_annotation <- HeatmapAnnotation(comparison = comparison)
+
+oncoPrint(m1_oncoprint_closing_crpc_pc, 
+          alter_fun = alter_fun,
+          col = colors, 
+          show_row_names = TRUE, 
+          show_row_barplot = FALSE,
+          show_column_names = FALSE,
+          remove_empty_columns = TRUE,
+          # top_annotation = top_annotation
+          )
+dev.off()
+
+
+# #####################
+# # GTRD ALL ALL DARS #
+# #####################
+# pdf("pictures/oncoprint/gtrdAll_all.pdf", height = pdf_height, width = pdf_width)
+# oncoPrint(m2_oncoprint,
+#           alter_fun = alter_fun,
+#           col = colors,
+#           show_row_names = FALSE,
+#           show_row_barplot = FALSE,
+#           show_column_names = FALSE,
+#           remove_empty_columns = TRUE,
+#           top_annotation = HeatmapAnnotation(status = factor(setNames(annot_m2$status, rownames(annot_m2))),
+#                                              comparison = factor(setNames(annot_m2$comparison, rownames(annot_m2))))
+#           )
+# dev.off()
+# 
+# #########################
+# # GTRD ALL OPENING DARS #
+# #########################
+# pdf("pictures/oncoprint/gtrdAll_opening.pdf", height = pdf_height, width = pdf_width)
+# oncoPrint(m2_oncoprint_opening, 
+#           alter_fun = alter_fun,
+#           col = colors, 
+#           show_row_names = FALSE, 
+#           show_row_barplot = FALSE,
+#           show_column_names = FALSE,
+#           remove_empty_columns = TRUE,
+#           top_annotation = HeatmapAnnotation(comparison = factor(setNames(annot_m2$comparison, rownames(annot_m2))))
+#           )
+# dev.off()
+# 
+# #########################
+# # GTRD ALL CLOSING DARS #
+# #########################
+# pdf("pictures/oncoprint/gtrdAll_closing.pdf", height = pdf_height, width = pdf_width)
+# oncoPrint(m2_oncoprint_closing, 
+#           alter_fun = alter_fun,
+#           col = colors, 
+#           show_row_names = FALSE, 
+#           show_row_barplot = FALSE,
+#           show_column_names = FALSE,
+#           remove_empty_columns = TRUE,
+#           top_annotation = HeatmapAnnotation(comparison = factor(setNames(annot_m2$comparison, rownames(annot_m2))))
+#           )
+# dev.off()
+
+```
+
+```{r}
+fp <- "dar_and_tad/lncap/lncap_tad_dar_gene_correlation.xlsx"
+sheet_name <- "crpc_bph"
+sheet <- readWorkbook(fp, sheet = 3)
+sheet <- as.data.table(sheet)
+
+dars <- fread("dar/turp_corrected_log2ratio_2/dars_crpc_bph.bed")
+dars <- dars[, .(dar_id = paste(chrom,start,end,sep="_"),
+                          status = ifelse(log2_ratio > 0, "opening", "closing"))]
+
+tf <- list(pca=vector(), 
+           all=vector())
+
+# dars <- sheet$dar_id
+tf[["pca"]] <- getTf(sheet$gtrd.pca)
+tf[["all"]] <- getTf(sheet$gtrd.all)
+
+m1 <- matrix(0, nrow(dars), length(tf[["pca"]]), dimnames = list(dars$dar_id, tf[["pca"]]))
+m2 <- matrix(0, nrow(dars), length(tf[["all"]]), dimnames = list(dars$dar_id, tf[["all"]]))
+
+for (ii in seq(nrow(sheet))) {
+  # dar <- dars[ii]
+  row <- sheet[ii, ]
+  
+  cur_dar_id <- row$dar_id
+  cur_tf_pca <- getTf(row$gtrd.pca)
+  cur_tf_all <- getTf(row$gtrd.all)
+  
+  if (length(cur_tf_pca)>0){
+    m1[rownames(m1) == cur_dar_id, cur_tf_pca] <- 1
+  }
+  if(length(cur_tf_all) >0){
+    m2[rownames(m1) == cur_dar_id, cur_tf_all] <- 1
+  }
+}
+
+m1 <- m1[rowSums(m1) != 0,]
+m2 <- m2[rowSums(m2) != 0,]
+
+m1 <- m1[!duplicated(rownames(m1)),]
+m2 <- m2[!duplicated(rownames(m2)),]
+
+annot_m1 <- as.data.frame(dars[match(rownames(m1), dar_id),])
+rownames(annot_m1) <- rownames(m1)
+annot_m1$dar_id <- NULL
+
+m1 <- t(apply(m1, c(1,2), function(x) ifelse(x == 1, "present", "")))
+
+m1_opening <- m1[,match(rownames(annot_m1)[which(annot_m1$status == "opening")], colnames(m1))]
+m1_closing <- m1[,match(rownames(annot_m1)[which(annot_m1$status == "closing")], colnames(m1))]
+# m1 <- convertOncoprintMat(m1, annot_m1)
+# m2 <- convertOncoprintMat(m2, annot_m2)
+
+colors <- c(present="darkgoldenrod1", absent="grey90", pc_bph="orangered", crpc_pc="orangered")
+
+alter_fun = list(
+    background = function(x, y, w, h) 
+        grid.rect(x, y, w*0.9, h*0.9, gp = gpar(fill = colors["absent"], col = NA)),
+    present = function(x, y, w, h) 
+        grid.rect(x, y, w*0.9, h*0.9, gp = gpar(fill = colors["present"], col = NA)),
+    pc_bph = function(x, y, w, h) 
+        grid.rect(x, y, w*0.9, h*0.9, gp = gpar(fill = colors["pc_bph"], col = NA)),
+    crpc_pc = function(x, y, w, h) 
+      grid.rect(x, y, w*0.9, h*0.9, gp = gpar(fill = colors["crpc_pc"], col = NA))
+
+    # blue rectangles
+    # absent = function(x, y, w, h) 
+    #     grid.rect(x, y, w*0.9, h*0.9, gp = gpar(fill = colors["absent"], col = NA))
+    # # dots
+    # intronic = function(x, y, w, h) 
+    #     grid.points(x, y, pch = 16),
+    # # crossed lines
+    # exonic = function(x, y, w, h) {
+    #     grid.segments(x - w*0.4, y - h*0.4, x + w*0.4, y + h*0.4, gp = gpar(lwd = 2))
+    #     grid.segments(x + w*0.4, y - h*0.4, x - w*0.4, y + h*0.4, gp = gpar(lwd = 2))
+    # }
+)
+
+
+pdf("pictures/oncoprint/gtrdPca_opening_crpc_bph.pdf", height = 12, width = 12)
+oncoPrint(m1_opening, 
+          alter_fun = alter_fun,
+          col = colors, 
+          show_row_names = TRUE, 
+          show_row_barplot = FALSE,
+          show_column_names = FALSE,
+          remove_empty_columns = TRUE,
+          # top_annotation = top_annotation
+          )
+dev.off()
+
+pdf("pictures/oncoprint/gtrdPca_closing_crpc_bph.pdf", height = 12, width = 12)
+oncoPrint(m1_closing, 
+          alter_fun = alter_fun,
+          col = colors, 
+          show_row_names = TRUE, 
+          show_row_barplot = FALSE,
+          show_column_names = FALSE,
+          remove_empty_columns = TRUE,
+          # top_annotation = top_annotation
+          )
+dev.off()
+
+annot_m2 <- as.data.frame(dars[match(rownames(m2), dar_id),])
+rownames(annot_m2) <- rownames(m2)
+annot_m2$dar_id <- NULL
+
+m2 <- t(apply(m2, c(1,2), function(x) ifelse(x == 1, "present", "")))
+
+m2_opening <- m2[,match(rownames(annot_m2)[which(annot_m2$status == "opening")], colnames(m2))]
+m2_closing <- m2[,match(rownames(annot_m2)[which(annot_m2$status == "closing")], colnames(m2))]
+
+
+pdf("pictures/oncoprint/gtrdAll_opening_crpc_bph.pdf", height = 12, width = 12)
+oncoPrint(m2_opening, 
+          alter_fun = alter_fun,
+          col = colors, 
+          show_row_names = TRUE, 
+          show_row_barplot = FALSE,
+          show_column_names = FALSE,
+          remove_empty_columns = TRUE,
+          # top_annotation = top_annotation
+          )
+dev.off()
+
+pdf("pictures/oncoprint/gtrdAll_closing_crpc_bph.pdf", height = 12, width = 12)
+oncoPrint(m2_closing, 
+          alter_fun = alter_fun,
+          col = colors, 
+          show_row_names = TRUE, 
+          show_row_barplot = FALSE,
+          show_column_names = FALSE,
+          remove_empty_columns = TRUE,
+          # top_annotation = top_annotation
+          )
+dev.off()
+
+
+```
+
+
+# Compute background correlation coefficient distribution
+
+```{r}
+load("R_data/RNAdds.RData")
+load("R_data/sRNA_dds.RData")
+```
+
+```{r}
+mir_annot <- mcols(rowRanges(srna_se_filter))
+all_gr <- c(granges(rowRanges(rna_dds)), granges(rowRanges(srna_se_filter)))
+```
+
+```{r}
+dars_2_comparison <- fread("dar/turp_corrected_log2ratio_2/with_comparison_group_col/combined_2_comparisons.bed")
+dars_2_comparison[,dar_id:=paste(chrom,start,end,sep="_")]
+dars_gr <- makeGRangesFromDataFrame(as.data.frame(dars_2_comparison),
+                                    seqnames.field = "chrom",
+                                    start.field = "start",
+                                    end.field = "end",
+                                    keep.extra.columns = TRUE,
+                                    starts.in.df.are.0based = FALSE)
+```
+
+```{r}
+all_mrna_spearman_dedup <- all_mrna_spearman[!duplicated(all_mrna_spearman$dar_id)]
+all_mirna_spearman_dedup <- all_mirna_spearman[!duplicated(all_mirna_spearman$dar_id)]
+
+all_spearman_cor <- merge(all_mrna_spearman_dedup, all_mirna_spearman_dedup, by = "dar_id")
+all_spearman_cor <- all_spearman_cor[dar_id %in% dars_2_comparison$dar_id]
+
+rn <- all_spearman_cor$dar_id
+all_spearman_cor <- as.matrix(all_spearman_cor[,-"dar_id"])
+rownames(all_spearman_cor) <- rn
+```
+
+```{r}
+all_mrna_pearson_dedup <- all_mrna_pearson[!duplicated(all_mrna_pearson$dar_id)]
+all_mirna_pearson_dedup <- all_mirna_pearson[!duplicated(all_mirna_pearson$dar_id)]
+
+all_pearson_cor <- merge(all_mrna_pearson_dedup, all_mirna_pearson_dedup, by = "dar_id")
+all_pearson_cor <- all_pearson_cor[dar_id %in% dars_2_comparison$dar_id]
+
+rn <- all_pearson_cor$dar_id
+all_pearson_cor <- as.matrix(all_pearson_cor[,-"dar_id"])
+rownames(all_pearson_cor) <- rn
+
+```
+
+```{r}
+
+# s <- rbind(readWorkbook("dar_and_tad/lncap/lncap_tad_dar_gene_correlation.xlsx", sheet = 1), 
+#            readWorkbook("dar_and_tad/lncap/lncap_tad_dar_gene_correlation.xlsx", sheet = 2))
+
+tads <- rtracklayer::import("dar_and_tad/lncap/lncap_tads.bed")
+start(tads) <- start(tads) - 1
+
+pairs <- mclapply(seq_along(tads), function (i) {
+  tad <- tads[i]
+  genes_inside <- c(rowRanges(rna_dds)$gene_id[rowRanges(rna_dds) %over% tad], 
+                    rowRanges(srna_se_filter)$Name[rowRanges(srna_se_filter) %over% tad])
+  dars_inside <- dars_gr$dar_id[dars_gr %over% tad]
+  return(expand.grid(genes_inside, dars_inside))
+}, mc.cores = NCORES)
+
+pairs <- do.call(rbind, pairs)
+
+signal <- vector(mode = "numeric", nrow(pairs))
+for (i in seq(nrow(pairs))) {
+  dar <- pairs[i, "Var2"]
+  gene <- pairs[i, "Var1"]
+  signal[i] <- all_spearman_cor[dar, gene]
+  all_spearman_cor[dar, gene] <- NA
+  
+}
+
+
+
+
+```
+
+```{r}
+
+doPlot <- function(mat, vect, label) {
+  
+  bg <- hist(mat, 30, plot = FALSE)
+  bg$counts <- log10(bg$counts)
+  # bg$density <- bg$counts/sum(bg$counts)*100
+  
+  signal <- hist(vect, 30, plot = FALSE)
+  signal$counts <- log10(signal$counts)
+  # signal$density <- signal$counts/sum(signal$counts)*100
+  
+  # lo_bg <- loess.smooth(seq(-1,1, length.out = length(bg$density)), bg$density, evaluation = 100)
+  # lo_signal <- loess.smooth(seq(-1,1, length.out = length(signal$density)), signal$density, evaluation = 100) 
+
+  plot(bg,
+       # freq=FALSE, 
+       xlim = c(-1,1),
+       ylab = "Frequency (log10)", 
+       main = sprintf("Distribution of %s correlation coefficients", label),
+       xlab = sprintf("%s correlation coefficient", label),
+       col = rgb(211/255,211/255,211/255,0.4))
+  
+  plot(signal,
+       add = TRUE,
+       # freq=FALSE, 
+       col = rgb(1,0,0,0.4))
+  
+  # lines(lo_bg$x, lo_bg$y, lwd = 2)
+  # lines(lo_signal$x, lo_signal$y, lwd = 2, col = "red")
+  legend("topright", legend = c("Background", "Signal"), col = c("black", "red"), lwd = 2)
+
+}
+
+pdf("pictures/dar_in_tad_correlations_bg_and_signal_hist.pdf")
+# par(mfrow = c(2,1))
+doPlot(all_spearman_cor, signal, "Spearman")
+# doPlot(all_pearson_cor, 
+#        as.numeric(gsub(".*pearson: (-?[0-9\\.]*), .*\\)", "\\1", unlist(strsplit(s$genes, "; ")))), 
+#        "Pearson")
+dev.off()
+
+```
+
+
+# Figure 4E
+
+```{r}
+
+fp <- "dar_and_tad/lncap/lncap_tad_dar_gene_by_tf.xlsx"
+
+sheet_names <- getSheetNames(fp)
+
+```
+
+

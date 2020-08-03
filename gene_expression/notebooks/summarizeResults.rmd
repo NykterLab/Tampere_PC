@@ -1,0 +1,807 @@
+---
+title: 'Tampere PC: Summarization of results'
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+author: "Francesco Tabaro"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true  
+    df_print: tibble
+    fig_caption: true
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    fig_caption: true
+    df_print: paged
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+---
+
+```{r setup}
+knitr::opts_knit$set(root.dir="/bmt-data/genomics//projects//atac_workdir/")
+
+library(openxlsx)
+library(data.table)
+```
+
+# Load data
+
+## Annotation
+
+```{r}
+source("R/getAnnotationTable.R")
+ann <- getAnnotationTable()
+```
+
+```{r}
+ann.gene <- as.data.frame(subset(ann, type == "gene"))
+```
+
+## Uniprot to Ensembl mapping
+
+```{r}
+all_prot_map <- fread("tables/swissprotdata_normalized.tsv", select = c("uniprot", "gn"))
+
+biomart_map <- fread("tables/uniprot2ensembleGeneID/biomart_missing_uniprot.tsv", select = c(1,2)) # mapping from Biomart (Ensembl 90)
+names(biomart_map) <- c("uniprot", "ensgid")
+biomart_map[, ensgid := paste(ensgid, collapse = "|"), by = uniprot]
+
+uniprot_map <- fread("tables/uniprot2ensembleGeneID/uniprot_mapping_missed.tsv") # mapping from Uniprot (unknown Ensembl)
+names(uniprot_map) <- c("uniprot", "ensgid")
+uniprot_map[, ensgid := paste(ensgid, collapse = "|"), by = uniprot]
+
+missing_map <- rbind(biomart_map, uniprot_map)
+missing_map <- missing_map[!duplicated(missing_map)]
+missing_map[, ensgid := sapply(ensgid, function(x) ifelse(any(grepl(x, ann.gene$gene_id)), grep(x, ann.gene$gene_id, value = TRUE), ""))]
+missing_map <- missing_map[ensgid != ""]
+
+all_prot_map[, ensgid := ann.gene$gene_id[match(gn, ann.gene$gene_name)]]
+all_prot_map[match(missing_map$uniprot, uniprot), ensgid := missing_map[match(uniprot, uniprot), ensgid]]
+
+```
+
+# Prepare output matrices
+
+```{r}
+out_table <- matrix(NA, 10, 4, 
+                    dimnames = list(c("TSS", 
+                                      "DAR_in_promoter", 
+                                      "DAR_to_closest_gene", 
+                                      "DAR_in_TAD", 
+                                      "Peaks_in_promoter", 
+                                      "Peaks_to_closest_gene", 
+                                      "Peaks_in_TAD", 
+                                      "Totals_(union)",
+                                      "Totals_(available)", 
+                                      "Tot_union/tot_available_(%)"),
+                                    c("Genes", 
+                                      "Genes with SWATH",
+                                      "Proteins", 
+                                      "Intersection")))
+
+out_table_peaks <- matrix(NA,10,4, 
+                          dimnames = list(c("TSS", 
+                                            "DAR_in_promoter", 
+                                            "DAR_to_closest_gene", 
+                                            "DAR_in_TAD", 
+                                            "Peaks_in_promoter", 
+                                            "Peaks_to_closest_gene", 
+                                            "Peaks_in_TAD", 
+                                            "Totals_(union)",
+                                            "Totals_(available)", 
+                                            "Tot_union/tot_available_(%)"),
+                                          c("Genes", 
+                                            "Genes with SWATH",
+                                            "Proteins", 
+                                            "Intersection")))
+
+all_genes <- vector("list", nrow(out_table) - 3)
+all_proteins <- vector("list", nrow(out_table) - 3)
+all_swath <- vector("list", nrow(out_table) - 3)
+
+all_peaks <- vector("list", nrow(out_table) - 3)
+all_proteins_peaks <- vector("list", nrow(out_table) - 3)
+all_swath_peaks <- vector("list", nrow(out_table) - 3)
+
+```
+
+# Set correlation threshold
+
+```{r}
+COR_THR <- 0.5
+```
+
+# ATAC@TSS
+
+```{r}
+genes_tss_filename <- "tables/correlation_turp/tss_deg_v3/allTss_correlation.xlsx"
+prot_tss_filename <- "tables/correlation_turp/tss_deg_v3/allProtTss_correlation.xlsx"
+
+sheets <- getSheetNames(file = genes_tss_filename)
+
+genes <- vector("list", length = length(sheets))
+genes_with_swath <- vector("list", length(sheets))
+proteins <- vector("list", length = length(sheets))
+
+for (i in seq_along(sheets)){
+  genes_tss <- readWorkbook(xlsxFile = genes_tss_filename, sheet = i)
+  genes_tss <- subset(genes_tss, abs(spearman) > COR_THR | abs(pearson) > COR_THR)
+  genes[[i]] <- unique(genes_tss$gene_id)
+  
+  prot_tss <- readWorkbook(xlsxFile = prot_tss_filename, sheet = i)
+  prot_tss <- subset(prot_tss, abs(spearman) > COR_THR | abs(pearson) > COR_THR)
+  proteins[[i]] <- unique(prot_tss$gene_id)
+  
+  genes_with_swath[[i]] <- intersect(unique(genes_tss$gene_id), all_prot_map$ensgid)
+  
+  
+}
+
+out_table[1,1] <- length(Reduce(union, genes))
+out_table[1,2] <- length(Reduce(union, genes_with_swath))
+out_table[1,3] <- length(Reduce(union, proteins))
+out_table[1,4] <- length(Reduce(intersect, list(Reduce(union, genes),Reduce(union, genes_with_swath),Reduce(union, proteins))))
+
+all_genes[[1]] <- Reduce(union, genes)
+all_proteins[[1]] <- Reduce(union, proteins)
+all_swath[[1]] <- Reduce(union, genes_with_swath)
+
+```
+
+# DAR in promoters
+
+```{r}
+
+dars_in_proms_filename <- "tables/correlation_turp/promoters_1000u_100d/correlation.xlsx"
+sheets <- getSheetNames(file = dars_in_proms_filename)
+
+genes <- vector("list", length = length(sheets))
+genes_with_swath <- vector("list", length(sheets))
+proteins <- vector("list", length = length(sheets))
+
+peaks_to_genes <- vector("list", length = length(sheets))
+peaks_to_genes_with_swath <- vector("list", length = length(sheets))
+peaks_to_proteins <- vector("list", length = length(sheets))
+
+for (i in seq_along(sheets)){
+  dar_in_prom <- readWorkbook(xlsxFile = dars_in_proms_filename, sheet = i)
+  dar_in_prom_genes <- subset(dar_in_prom, abs(spearman) > COR_THR | abs(pearson) > COR_THR)
+  dar_in_prom_prot <- subset(dar_in_prom, abs(protein_spearman) > COR_THR | abs(protein_pearson) > COR_THR)
+  
+  genes[[i]] <- unique(dar_in_prom_genes$gene_id)
+  proteins[[i]] <- unique(dar_in_prom_prot$gene_id)
+  
+  genes_with_swath[[i]] <- intersect(unique(dar_in_prom_genes$gene_id), all_prot_map$ensgid)
+  
+  peaks_to_genes[[i]] <- unique(dar_in_prom_genes$dar_id)
+  peaks_to_genes_with_swath[[i]] <- unique(dar_in_prom_genes[dar_in_prom_genes$gene_id %in% genes_with_swath[[i]], "dar_id"])
+  peaks_to_proteins[[i]] <- unique(dar_in_prom_prot$dar_id)
+}
+
+out_table[2,1] <- length(Reduce(union, genes)) 
+out_table[2,2] <- length(Reduce(union, genes_with_swath))
+out_table[2,3] <- length(Reduce(union, proteins))
+out_table[2,4] <- length(Reduce(intersect, list(Reduce(union, genes),Reduce(union, genes_with_swath),Reduce(union, proteins))))
+
+all_genes[[2]] <- Reduce(union, genes)
+all_proteins[[2]] <- Reduce(union, proteins)
+all_swath[[2]] <- Reduce(union, genes_with_swath)
+
+out_table_peaks[2,1] <- length(Reduce(union, peaks_to_genes))
+out_table_peaks[2,2] <- length(Reduce(union, peaks_to_genes_with_swath))
+out_table_peaks[2,3] <- length(Reduce(union, peaks_to_proteins))
+out_table_peaks[2,4] <- length(Reduce(intersect, list(Reduce(union, peaks_to_genes),Reduce(union, peaks_to_genes_with_swath),Reduce(union, peaks_to_proteins))))
+
+all_peaks[[2]] <- Reduce(union, peaks_to_genes)
+all_proteins_peaks[[2]] <- Reduce(union, peaks_to_proteins)
+all_swath_peaks[[2]] <- Reduce(union, peaks_to_genes_with_swath)
+
+```
+
+# DAR to closest gene
+
+```{r}
+
+dar_closest_gene_filename <- "tables/correlation_turp/dar_v2/dar_correlation_homer_closest_gene.xlsx"
+sheets <- getSheetNames(file = dar_closest_gene_filename)
+
+genes <- vector("list", length = length(sheets))
+genes_with_swath <- vector("list", length(sheets))
+proteins <- vector("list", length = length(sheets))
+
+peaks_to_genes <- vector("list", length = length(sheets))
+peaks_to_genes_with_swath <- vector("list", length = length(sheets))
+peaks_to_proteins <- vector("list", length = length(sheets))
+
+for (i in seq_along(sheets)){
+  dar_closest_gene <- readWorkbook(xlsxFile = dar_closest_gene_filename, sheet = i)
+  dar_closest_gene_gene <- subset(dar_closest_gene, abs(spearman) > COR_THR | abs(pearson) > COR_THR)
+  dar_closest_gene_protein <- subset(dar_closest_gene, abs(spearman_protein) > COR_THR | abs(pearson_protein) > COR_THR)
+  
+  genes[[i]] <- unique(dar_closest_gene_gene$Nearest.Ensembl)
+  proteins[[i]] <- unique(dar_closest_gene_protein$Nearest.Ensembl)
+  
+  genes_with_swath[[i]] <- intersect(unique(dar_closest_gene_gene$Nearest.Ensembl), all_prot_map$ensgid)
+  
+  peaks_to_genes[[i]] <- unique(dar_closest_gene_gene$dar_id)
+  peaks_to_genes_with_swath[[i]] <- unique(dar_closest_gene_gene[dar_closest_gene_gene$Nearest.Ensembl %in% genes_with_swath[[i]], "dar_id"])
+  peaks_to_proteins[[i]] <- unique(dar_closest_gene_protein$dar_id)
+
+}
+
+out_table[3,1] <- length(Reduce(union, genes))
+out_table[3,2] <- length(Reduce(union, genes_with_swath))
+out_table[3,3] <- length(Reduce(union, proteins))
+out_table[3,4] <- length(Reduce(intersect, list(Reduce(union, genes),Reduce(union, genes_with_swath),Reduce(union, proteins))))
+
+all_genes[[3]] <- Reduce(union, genes)
+all_proteins[[3]] <- Reduce(union, proteins)
+all_swath[[3]] <- Reduce(union, genes_with_swath)
+
+out_table_peaks[3,1] <- length(Reduce(union, peaks_to_genes))
+out_table_peaks[3,2] <- length(Reduce(union, peaks_to_genes_with_swath))
+out_table_peaks[3,3] <- length(Reduce(union, peaks_to_proteins))
+out_table_peaks[3,4] <- length(Reduce(intersect,list(Reduce(union, peaks_to_genes),
+                                                     Reduce(union, peaks_to_genes_with_swath),
+                                                     Reduce(union, peaks_to_proteins))))
+
+all_peaks[[3]] <- Reduce(union, peaks_to_genes)
+all_proteins_peaks[[3]] <- Reduce(union, peaks_to_proteins)
+all_swath_peaks[[3]] <- Reduce(union, peaks_to_genes_with_swath)
+
+```
+
+# DAR in TAD
+
+```{r}
+dar_in_tad_filename <- "dar_and_tad/lncap/lncap_tad_dar_gene_correlation.xlsx"
+
+# sheets <- getSheetNames(file = dar_in_tad_filename)
+sheets <- c("pc_bph", "crpc_pc")
+
+extractGenelist <- function (v) {
+  L <- unlist(strsplit(v, split = "; "))
+  L <- L[!is.na(L)]
+  df <- data.frame(gene=gsub("(.*) \\(.*\\)", "\\1", L),
+                   pearson=as.numeric(gsub(".* \\(pearson: (-?[0-9.]+), .*\\)",  "\\1", L)),
+                   spearman=as.numeric(gsub(".* \\(.*, spearman: (-?[0-9.]+), .*\\)", "\\1", L)), stringsAsFactors = FALSE)
+  df <- subset(df, abs(pearson) > COR_THR | abs(spearman) > COR_THR)
+  unique(df$gene)
+}
+
+extractProteinlist <- function (v) {
+  L <- unlist(strsplit(v, split = "; "))
+  L <- L[!is.na(L)]
+  df <- data.frame(name=gsub("(.*) \\(.*\\)", "\\1", L),
+                   uniprot=gsub(".* \\((.*), pearson: -?[0-9.]+, spearman: -?[0-9.]+\\)",  "\\1", L),
+                   pearson=as.numeric(gsub(".* \\(.*, pearson: (-?[0-9.]+), .*\\)",  "\\1", L)),
+                   spearman=as.numeric(gsub(".* \\(.*, spearman: (-?[0-9.]+)\\)", "\\1", L)), stringsAsFactors = FALSE)
+  df <- merge(df,all_prot_map,by="uniprot")
+  df <- subset(df, abs(pearson) > COR_THR | abs(spearman) > COR_THR)
+  unique(df$ensgid)
+}
+
+mapGenenames <- function (gn) {
+  g <- subset(ann, gene_name %in% gn & type == "gene")
+  return(g$gene_id)
+}
+
+extractDarsGenes <- function (df) {
+  g <- unique(extractGenelist(df$genes))
+  k <- do.call(c, lapply(g, function(each) { grep(pattern = each, x = df$genes, fixed = T) }))
+  unique(df[k, "dar_id"])
+}
+
+extractDarsProteins <- function (df) {
+  p <- unique(extractProteinlist(df$proteins))
+  k <- do.call(c, lapply(p, function(each) { grep(pattern = each, x = df$proteins, fixed = T) }))
+  unique(df[k, "dar_id"])
+}
+
+extractDarsGenesSwath <- function (df) {
+  g <- unique(extractGenelist(df$genes))
+  g <- intersect(g, all_prot_map$ensgid)
+  k <- do.call(c, lapply(g, function(each) { grep(pattern = each, x = df$genes, fixed = T) }))
+  unique(df[k, "dar_id"])
+}
+
+genes <- vector("list", length = length(sheets))
+genes_with_swath <- vector("list", length(sheets))
+proteins <- vector("list", length = length(sheets))
+
+peaks_to_genes <- vector("list", length = length(sheets))
+peaks_to_genes_with_swath <- vector("list", length = length(sheets))
+peaks_to_proteins <- vector("list", length = length(sheets))
+
+for (i in seq_along(sheets)){
+  dar_in_tad <- readWorkbook(xlsxFile = dar_in_tad_filename, sheet = i)
+  # dar_in_tad <- subset(dar_in_tad, abs(spearman) > COR_THR | abs(pearson) > COR_THR)
+  
+  sn <- sheets[i]
+  
+  peaklist <- extractDarsGenes(dar_in_tad)
+  peaklist_swath <- extractDarsGenesSwath(dar_in_tad)
+  peaklist_proteins <- extractDarsProteins(dar_in_tad)
+  # genenames_opening <- extractGenelist(dar_in_tad$genes)
+  genenames <- extractGenelist(dar_in_tad$genes)
+  # genenames <- genenames[!is.na(genenames)]
+  genenames <- mapGenenames(genenames)
+  
+  proteinnames <- extractProteinlist(dar_in_tad$proteins)
+  # proteinnames <- proteinnames[!is.na(proteinnames)]
+  
+  # genelist_opening <- ann$gene_id[ann$type == "gene" & ann$gene_name %in% genenames_opening]
+  # genelist_closing <- ann$gene_id[ann$type == "gene" & ann$gene_name %in% genenames_closing]
+  
+  # genes[[i]] <- unique(dar_closest_gene_gene$Nearest.Ensembl)
+  # proteins[[i]] <- unique(dar_closest_gene_protein$Nearest.Ensembl)
+
+  genes[[i]] <- genenames
+  proteins[[i]] <- proteinnames
+  
+  genes_with_swath[[i]] <- intersect(unique(genenames),all_prot_map$ensgid)
+  
+  peaks_to_genes[[i]] <- unique(peaklist)
+  peaks_to_genes_with_swath[[i]] <- unique(peaklist_swath)
+  peaks_to_proteins[[i]] <- unique(peaklist_proteins)
+  
+}
+
+out_table[4,1] <- length(Reduce(union, genes))
+out_table[4,2] <- length(Reduce(union, genes_with_swath))
+out_table[4,3] <- length(Reduce(union, proteins))
+out_table[4,4] <- length(Reduce(intersect, list(Reduce(union, genes),Reduce(union, genes_with_swath),Reduce(union, proteins))))
+
+all_genes[[4]] <- Reduce(union, genes)
+all_proteins[[4]] <- Reduce(union, proteins)
+all_swath[[4]] <- Reduce(union, genes_with_swath)
+
+
+out_table_peaks[4,1] <- length(Reduce(union, peaks_to_genes))
+out_table_peaks[4,2] <- length(Reduce(union, peaks_to_genes_with_swath))
+out_table_peaks[4,3] <- length(Reduce(union, peaks_to_proteins))
+out_table_peaks[4,4] <- length(Reduce(intersect,list(Reduce(union, peaks_to_genes),
+                                                     Reduce(union, peaks_to_genes_with_swath),
+                                                     Reduce(union, peaks_to_proteins))))
+
+all_peaks[[4]] <- Reduce(union, peaks_to_genes)
+all_proteins_peaks[[4]] <- Reduce(union, peaks_to_proteins)
+all_swath_peaks[[4]] <- Reduce(union, peaks_to_genes_with_swath)
+
+```
+
+# Peaks in promoters
+
+```{r}
+
+peaks_in_prom_filename <- "/bmt-data/genomics/projects/atac_workdir/tables/correlation_peaks/promoters/correlation_peaks.xlsx"
+
+sheets <- getSheetNames(file = peaks_in_prom_filename)
+
+genes <- vector("list", length = length(sheets))
+genes_with_swath <- vector("list", length(sheets))
+proteins <- vector("list", length = length(sheets))
+
+peaks_to_genes <- vector("list", length = length(sheets))
+peaks_to_genes_with_swath <- vector("list", length = length(sheets))
+peaks_to_proteins <- vector("list", length = length(sheets))
+
+for (i in seq_along(sheets)){
+  peaks_in_prom <- readWorkbook(xlsxFile = peaks_in_prom_filename, sheet = i)
+  
+  peaks_in_prom_genes <- subset(peaks_in_prom, abs(spearman) > COR_THR | abs(pearson) > COR_THR)
+  genenames <- unique(peaks_in_prom_genes$gene_id)
+  
+  peaks_in_prom_proteins <- subset(peaks_in_prom, abs(spearman_protein) > COR_THR | abs(pearson_protein) > COR_THR)
+  protnames <- unique(peaks_in_prom_proteins$gene_id)
+
+  genes[[i]] <- genenames
+  proteins[[i]] <- protnames
+  genes_with_swath[[i]] <- intersect(unique(genenames), all_prot_map$ensgid)
+  
+  peaks_to_genes[[i]] <- unique(peaks_in_prom_genes$peak_id)
+  peaks_to_genes_with_swath[[i]] <- unique(peaks_in_prom_genes[peaks_in_prom_genes$gene_id %in% genes_with_swath[[i]], "peak_id"])
+  peaks_to_proteins[[i]] <- unique(peaks_in_prom_proteins$peak_id)
+
+}
+
+out_table[5,1] <- length(Reduce(union, genes))
+out_table[5,2] <- length(Reduce(union, genes_with_swath))
+out_table[5,3] <- length(Reduce(union, proteins))
+out_table[5,4] <- length(Reduce(intersect, list(Reduce(union, genes),Reduce(union, genes_with_swath),Reduce(union, proteins))))
+
+all_genes[[5]] <- Reduce(union, genes)
+all_proteins[[5]] <- Reduce(union, proteins)
+all_swath[[5]] <- Reduce(union, genes_with_swath)
+
+out_table_peaks[5,1] <- length(Reduce(union, peaks_to_genes))
+out_table_peaks[5,2] <- length(Reduce(union, peaks_to_genes_with_swath))
+out_table_peaks[5,3] <- length(Reduce(union, peaks_to_proteins))
+out_table_peaks[5,4] <- length(Reduce(intersect,list(Reduce(union, peaks_to_genes),
+                                                     Reduce(union, peaks_to_genes_with_swath),
+                                                     Reduce(union, peaks_to_proteins))))
+
+all_peaks[[5]] <- Reduce(union, peaks_to_genes)
+all_proteins_peaks[[5]] <- Reduce(union, peaks_to_proteins)
+all_swath_peaks[[5]] <- Reduce(union, peaks_to_genes_with_swath)
+
+
+```
+
+# Peaks to closest gene
+
+```{r}
+  
+peaks_to_closest_gene_filename <- "tables/genes_to_closest_peak_cor05.xlsx"
+
+sheets <- getSheetNames(file = peaks_to_closest_gene_filename)
+
+genes <- vector("list", length = length(sheets))
+genes_with_swath <- vector("list", length(sheets))
+proteins <- vector("list", length = length(sheets))
+
+peaks_to_genes <- vector("list", length = length(sheets))
+peaks_to_genes_with_swath <- vector("list", length = length(sheets))
+peaks_to_proteins <- vector("list", length = length(sheets))
+
+for (i in seq_along(sheets)){
+  peaks_to_closest_gene <- readWorkbook(xlsxFile = peaks_to_closest_gene_filename, sheet = i)
+  
+  peaks_to_closest_gene_genes <- subset(peaks_to_closest_gene, abs(spearman) > COR_THR | abs(pearson) > COR_THR)
+  genelist <- unique(peaks_to_closest_gene_genes$Nearest.Ensembl)
+  
+  peaks_to_closest_gene_proteins <- subset(peaks_to_closest_gene, abs(spearman_protein) > COR_THR | abs(pearson_protein) > COR_THR)
+  protlist <- unique(peaks_to_closest_gene_proteins$Nearest.Ensembl)
+
+  genes[[i]] <- genelist
+  proteins[[i]] <- protlist
+  genes_with_swath[[i]] <- intersect(unique(genelist), all_prot_map$ensgid)
+  
+  peaks_to_genes[[i]] <- unique(peaks_to_closest_gene_genes[peaks_to_closest_gene_genes$Nearest.Ensembl %in% genelist, "peak_id"])
+  peaks_to_genes_with_swath[[i]] <- unique(peaks_to_closest_gene_genes[peaks_to_closest_gene_genes$Nearest.Ensembl %in% genes_with_swath[[i]], "peak_id"])
+  peaks_to_proteins[[i]] <- unique(peaks_to_closest_gene_proteins[peaks_to_closest_gene_proteins$Nearest.Ensembl %in% protlist, "peak_id"])
+
+}
+
+out_table[6,1] <- length(Reduce(union, genes))
+out_table[6,2] <- length(Reduce(union, genes_with_swath))
+out_table[6,3] <- length(Reduce(union, proteins))
+out_table[6,4] <- length(Reduce(intersect, list(Reduce(union, genes),Reduce(union, genes_with_swath),Reduce(union, proteins))))
+
+all_genes[[6]] <- Reduce(union, genes)
+all_proteins[[6]] <- Reduce(union, proteins)
+all_swath[[6]] <- Reduce(union, genes_with_swath)
+
+out_table_peaks[6,1] <- length(Reduce(union, peaks_to_genes))
+out_table_peaks[6,2] <- length(Reduce(union, peaks_to_genes_with_swath))
+out_table_peaks[6,3] <- length(Reduce(union, peaks_to_proteins))
+out_table_peaks[6,4] <- length(Reduce(intersect,list(Reduce(union, peaks_to_genes),
+                                                     Reduce(union, peaks_to_genes_with_swath),
+                                                     Reduce(union, peaks_to_proteins))))
+
+all_peaks[[6]] <- Reduce(union, peaks_to_genes)
+all_proteins_peaks[[6]] <- Reduce(union, peaks_to_proteins)
+all_swath_peaks[[6]] <- Reduce(union, peaks_to_genes_with_swath)
+
+```
+
+# Peaks in TAD
+
+```{r}
+
+peaks_in_tad_filename <- "tables/peaks_in_tad_aggregated_cor05.xlsx"
+
+extractGenelist <- function (v) {
+  L <- unlist(strsplit(v, split = "; "))
+  L <- L[!is.na(L)]
+  df <- data.frame(gene=gsub(".* \\((.*), pearson: -?[0-9.]+, spearman: -?[0-9.]+\\)", "\\1", L),
+                   pearson=as.numeric(gsub(".* \\(.*, pearson: (-?[0-9.]+), .*\\)",  "\\1", L)),
+                   spearman=as.numeric(gsub(".* \\(.*, spearman: (-?[0-9.]+)\\)", "\\1", L)), stringsAsFactors = FALSE)
+  # df <- subset(df, abs(pearson) > COR_THR | abs(spearman) > COR_THR)
+  unique(df$gene)
+}
+
+extractProteinlist <- function (v) {
+  L <- unlist(strsplit(v, split = "; "))
+  L <- L[!is.na(L)]
+  df <- data.frame(gene=gsub(".* \\((.*), pearson: -?[0-9.]+, spearman: -?[0-9.]+\\)", "\\1", L),
+                   pearson=as.numeric(gsub(".* \\(.*, pearson: (-?[0-9.]+), .*\\)",  "\\1", L)),
+                   spearman=as.numeric(gsub(".* \\(.*, spearman: (-?[0-9.]+)\\)", "\\1", L)), stringsAsFactors = FALSE)
+  # df <- subset(df, abs(pearson) > COR_THR | abs(spearman) > COR_THR)
+  unique(df$gene)
+}
+
+extractPeaksGenes <- function (df) {
+  g <- unique(extractGenelist(df$genes))
+  k <- do.call(c, lapply(g, function(each) { grep(pattern = each, x = df$genes, fixed = T) }))
+  unique(df[k, "peak_id"])
+}
+
+extractPeaksProteins <- function (df) {
+  p <- unique(extractProteinlist(df$proteins))
+  k <- do.call(c, lapply(p, function(each) { grep(pattern = each, x = df$proteins, fixed = T) }))
+  unique(df[k, "peak_id"])
+}
+
+extractPeaksGenesSwath <- function (df) {
+  g <- unique(extractGenelist(df$genes))
+  g <- intersect(g, all_prot_map$ensgid)
+  k <- do.call(c, lapply(g, function(each) { grep(pattern = each, x = df$genes, fixed = T) }))
+  unique(df[k, "peak_id"])
+}
+
+sheets <- getSheetNames(file = peaks_in_tad_filename)
+
+genes <- vector("list", length = length(sheets))
+genes_with_swath <- vector("list", length(sheets))
+proteins <- vector("list", length = length(sheets))
+
+peaks_to_genes <- vector("list", length = length(sheets))
+peaks_to_genes_with_swath <- vector("list", length = length(sheets))
+peaks_to_proteins <- vector("list", length = length(sheets))
+
+for (i in seq_along(sheets)){
+  peaks_in_tad <- readWorkbook(xlsxFile = peaks_in_tad_filename, sheet = i)
+
+  genelist <- extractGenelist(peaks_in_tad$genes)
+  genes[[i]] <- genelist
+  
+  proteinlist <- extractProteinlist(peaks_in_tad$proteins)
+  proteins[[i]] <- proteinlist
+  
+  genes_with_swath[[i]] <- intersect(unique(genelist), all_prot_map$ensgid)
+  
+  peaks_to_genes[[i]] <- extractPeaksGenes(peaks_in_tad)
+  peaks_to_genes_with_swath[[i]] <- extractPeaksGenesSwath(peaks_in_tad)
+  peaks_to_proteins[[i]] <- extractPeaksProteins(peaks_in_tad)
+  
+  
+}
+
+out_table[7,1] <- length(Reduce(union, genes))
+out_table[7,2] <- length(Reduce(union, genes_with_swath))
+out_table[7,3] <- length(Reduce(union, proteins))
+out_table[7,4] <- length(Reduce(intersect, list(Reduce(union, genes),Reduce(union, genes_with_swath),Reduce(union, proteins))))
+
+all_genes[[7]] <- Reduce(union, genes)
+all_proteins[[7]] <- Reduce(union, proteins)
+all_swath[[7]] <- Reduce(union, genes_with_swath)
+
+out_table_peaks[7,1] <- length(Reduce(union, peaks_to_genes))
+out_table_peaks[7,2] <- length(Reduce(union, peaks_to_genes_with_swath))
+out_table_peaks[7,3] <- length(Reduce(union, peaks_to_proteins))
+out_table_peaks[7,4] <- length(Reduce(intersect,list(Reduce(union, peaks_to_genes),
+                                                     Reduce(union, peaks_to_genes_with_swath),
+                                                     Reduce(union, peaks_to_proteins))))
+
+all_peaks[[7]] <- Reduce(union, peaks_to_genes)
+all_proteins_peaks[[7]] <- Reduce(union, peaks_to_proteins)
+all_swath_peaks[[7]] <- Reduce(union, peaks_to_genes_with_swath)
+
+
+```
+
+# Compute totals
+
+```{r}
+out_table[8,1] <- length(Reduce(union, all_genes))
+out_table[8,2] <- length(Reduce(union, all_swath))
+out_table[8,3] <- length(Reduce(union, all_proteins))
+out_table[8,4] <- length(Reduce(intersect, list(Reduce(union, all_genes),Reduce(union, all_swath),Reduce(union, all_proteins))))
+
+out_table_peaks[8,1] <- length(Reduce(union, all_peaks))
+out_table_peaks[8,2] <- length(Reduce(union, all_swath_peaks))
+out_table_peaks[8,3] <- length(Reduce(union, all_proteins_peaks))
+out_table_peaks[8,4] <- length(Reduce(intersect, list(Reduce(union, all_peaks),Reduce(union, all_swath_peaks),Reduce(union, all_proteins_peaks))))
+
+```
+
+```{r}
+
+load("R_data/RNAdds.RData")
+load("R_data/sRNA_dds.RData")
+
+prot_qt <- fread("tables/swissprotdata_normalized.tsv")
+
+ntotgenes <- nrow(rna_dds) + nrow(srna_se_filter)
+ntotprots <- nrow(prot_qt)
+
+out_table[9, 1] <- ntotgenes
+out_table[9, 2] <- ntotprots
+out_table[9, 3] <- ntotprots
+out_table[9, 4] <- NA
+
+out_table[10, 1] <- round(out_table[8, 1] / out_table[9, 1] * 100, 1)
+out_table[10, 2] <- round(out_table[8, 2] / out_table[9, 2] * 100, 1)
+out_table[10, 3] <- round(out_table[8, 3] / out_table[9, 3] * 100, 1)
+out_table[10, 4] <- NA
+
+```
+
+
+# Plot tables
+
+```{r}
+library(ggplot2)
+library(reshape2)
+library(gridExtra)
+library(cowplot)
+
+tbl <- tableGrob(out_table)
+tbl_peaks <- tableGrob(out_table_peaks)
+
+tmp <- out_table[-c(8,9,10),]
+perc_table <- tmp / matrix(rep(apply(tmp,2,sum), each=nrow(tmp)), nrow(tmp))
+
+
+df <- as.data.frame(perc_table)
+df$set <- rownames(df)
+df <- melt(df)
+p <- ggplot(df, aes(variable, value, fill = set)) + 
+  geom_bar(stat = "identity", position = "stack", width = 0.85) +
+  # scale_fill_grey(start = 0, end = .9) +
+    # scale_fill_manual(values = rev(grey.colors(n = 7, start = 0.1, end = 0.7))) +
+  scale_fill_viridis(discrete = TRUE, direction = -1) +
+  xlab("") + 
+  ylab("fraction of correlating entities") +
+  ggtitle("COR THR = 0.5") +
+  # coord_polar("y") +
+  # theme_bw() +
+  theme(legend.direction = "horizontal",
+        legend.justification="center",
+        legend.box.just = "bottom",
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom" , 
+        # axis.text.y = element_blank() ,
+        axis.ticks = element_blank()) +
+  ylim(c(0, 0.99)) +
+  geom_text(data = df, hjust = 1, size = 3, aes(x = variable, y = 0, label = variable))
+
+leg <- get_legend(p)
+p <- p + theme(legend.position = "none")
+
+plt_left <- plot_grid(tbl, tbl_peaks, nrow = 2)
+plt <- plot_grid(plt_left, p, ncol = 2, rel_widths = c(1.1, 0.9))
+plt <- plot_grid(plt, leg, nrow = 2, rel_heights = c(1.25,0.1))
+
+# ggsave(plt, filename = "~/test/count_summary2.pdf", width = 12, height = 7)
+
+```
+
+## TESTS
+
+```{r}
+# https://www.r-graph-gallery.com/297-circular-barplot-with-groups/
+data <- df 
+
+# library
+library(tidyverse)
+
+# Create dataset
+data=data.frame(
+  individual=paste( "Mister ", seq(1,60), sep=""),
+  group=c( rep('A', 10), rep('B', 30), rep('C', 14), rep('D', 6)) ,
+  value=sample( seq(10,100), 60, replace=T)
+)
+
+# Set a number of 'empty bar' to add at the end of each group
+empty_bar=3
+to_add = data.frame( matrix(NA, empty_bar*nlevels(data$group), ncol(data)) )
+colnames(to_add) = colnames(data)
+to_add$group=rep(levels(data$group), each=empty_bar)
+data=rbind(data, to_add)
+data=data %>% arrange(group)
+data$id=seq(1, nrow(data))
+
+# Get the name and the y position of each label
+label_data=data
+number_of_bar=nrow(label_data)
+angle= 90 - 360 * (label_data$id-0.5) /number_of_bar     # I substract 0.5 because the letter must have the angle of the center of the bars. Not extreme right(1) or extreme left (0)
+label_data$hjust<-ifelse( angle < -90, 1, 0)
+label_data$angle<-ifelse(angle < -90, angle+180, angle)
+
+# prepare a data frame for base lines
+base_data=data %>% 
+  group_by(group) %>% 
+  summarize(start=min(id), end=max(id) - empty_bar) %>% 
+  rowwise() %>% 
+  mutate(title=mean(c(start, end)))
+
+# prepare a data frame for grid (scales)
+grid_data = base_data
+grid_data$end = grid_data$end[ c( nrow(grid_data), 1:nrow(grid_data)-1)] + 1
+grid_data$start = grid_data$start - 1
+grid_data=grid_data[-1,]
+
+# Make the plot
+p = ggplot(data, aes(x=as.factor(id), y=value, fill=group)) +       # Note that id is a factor. If x is numeric, there is some space between the first bar
+  
+  geom_bar(aes(x=as.factor(id), y=value, fill=group), stat="identity", alpha=0.5) +
+  
+  # Add a val=100/75/50/25 lines. I do it at the beginning to make sur barplots are OVER it.
+  geom_segment(data=grid_data, aes(x = end, y = 80, xend = start, yend = 80), colour = "grey", alpha=1, size=0.3 , inherit.aes = FALSE ) +
+  geom_segment(data=grid_data, aes(x = end, y = 60, xend = start, yend = 60), colour = "grey", alpha=1, size=0.3 , inherit.aes = FALSE ) +
+  geom_segment(data=grid_data, aes(x = end, y = 40, xend = start, yend = 40), colour = "grey", alpha=1, size=0.3 , inherit.aes = FALSE ) +
+  geom_segment(data=grid_data, aes(x = end, y = 20, xend = start, yend = 20), colour = "grey", alpha=1, size=0.3 , inherit.aes = FALSE ) +
+  
+  # Add text showing the value of each 100/75/50/25 lines
+  annotate("text", x = rep(max(data$id),4), y = c(20, 40, 60, 80), label = c("20", "40", "60", "80") , color="grey", size=3 , angle=0, fontface="bold", hjust=1) +
+  
+  geom_bar(aes(x=as.factor(id), y=value, fill=group), stat="identity", alpha=0.5) +
+  ylim(-100,120) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.text = element_blank(),
+    axis.title = element_blank(),
+    panel.grid = element_blank(),
+    plot.margin = unit(rep(-1,4), "cm") 
+  ) +
+  coord_polar() + 
+  geom_text(data=label_data, aes(x=id, y=value+10, label=individual, hjust=hjust), color="black", fontface="bold",alpha=0.6, size=2.5, angle= label_data$angle, inherit.aes = FALSE ) +
+  
+  # Add base line information
+  geom_segment(data=base_data, aes(x = start, y = -5, xend = end, yend = -5), colour = "black", alpha=0.8, size=0.6 , inherit.aes = FALSE )  +
+  geom_text(data=base_data, aes(x = title, y = -18, label=group), hjust=c(1,1,0,0), colour = "black", alpha=0.8, size=4, fontface="bold", inherit.aes = FALSE)
+
+p
+```
+
+
+```{r}
+library(viridis)
+
+df <- melt(t(perc_table))
+p <- ggplot(df, aes(Var1, value, fill = Var2)) + 
+  geom_bar(stat = "identity", position = "dodge", width = 0.85) +
+  # scale_fill_grey(start = 0, end = .9) +
+  # scale_fill_manual(values = rev(grey.colors(n = 7, start = 0.1, end = 0.7))) +
+  scale_fill_viridis(discrete = TRUE, direction = -1) +
+  xlab("") + 
+  # ylab("fraction of correlating entities") +
+  # ggtitle("COR THR = 0.5") + 
+  coord_polar(start = 0) +
+  theme_bw() +
+  theme(legend.direction = "horizontal",
+        legend.justification="center",
+        legend.box.just = "bottom",
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom" ,
+        axis.text.y = element_blank() ,
+        axis.ticks = element_blank()) +
+  ylim(c(-0.5, 1)) 
+  # geom_text(data = df, hjust = 1, size = 3, aes(x = variable, y = 0, label = variable))
+```
+
+# Plot Venn diagrams
+
+```{r}
+library(VennDiagram)
+
+groblist <- vector("list", 7)
+for(i in seq(7)) {
+  groblist[[i]] <- gTree(children=venn.diagram(list(swath_genes = all_swath[[i]], 
+                                                    proteins = all_proteins[[i]]), 
+                                               filename = NULL, 
+                                               resolution = 90,
+                                               height = 600,
+                                               width = 800,
+                                               main = rownames(out_table)[i],
+                                               fill = c("bisque", "gainsboro"),
+                                               main.fontfamily = "sans",
+                                               cat.fontfamily = "sans",
+                                               fontfamily = "sans"
+                                               ))
+}
+
+grid.arrange(grobs = groblist, nrow = 2, ncol = 4)
+ggsave(filename = "~/test/summaryVenn.pdf", arrangeGrob(grobs = groblist, nrow = 2, ncol = 4, 
+                                                        padding = unit(15, "mm"),
+                                                        top = "COR THR = 0.5"),
+       width = 15, height = 7)
+
+```
+
