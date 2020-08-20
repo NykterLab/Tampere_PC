@@ -1,21 +1,9 @@
 # ATAC-seq Tampere PC
 
-Repository to hold notebooks and R sources for the ATAC-seq of Tampere PC cohort data analysis project.
+Repository to hold notebooks and R sources for the ATAC-seq of Tampere PC cohort data analysis project: 
 
-Current folder structure
-```
-.
-├── gene_expression
-│   ├── notebooks
-│   │   ├── ATACvsGeneExpression_DAR_in_promoters.rmd
-│   │   ├── ATACvsGeneExpression_DAR_in_TAD.rmd
-│   │   ├── ATACvsGeneExpression_DARs.rmd
-│   │   ├── ATACvsGeneExpression_peaks.rmd
-│   │   ├── ATACvsGeneExpression_TSS.rmd
-│   │   └── GeneExpression_call_deg.rmd
-│   └── R
-│       ├── DARvGEXP_correlation_ALLvALL.R
-│       ├── doLFCscatterplot.R
-│       └── getAnnotationTable.R
-└── README.md
-```
+J. Tuominen, E. Afyounian, F. Tabaro, T. Häkkinen, A. Shcherban, M. Annala, R. Nurminen, K. Kivinummi, T. Tammela, A. Urbanucci, L. Latonen, J. Kesseli, K. J. Granberg, T. Visakorpi and M. Nykter, **Chromatin accessibility analysis uncovers regulatory element landscape in prostate cancer progression.**
+
+## Repository structure
+
+- `gene_expression`: this folder contains code used to call differentially expressed genes and the integrated analysis with ATAC-seq and ChIP-seq data from GTRD.

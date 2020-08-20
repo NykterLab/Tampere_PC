@@ -6,7 +6,7 @@ output:
   pdf_document:
   toc: true
 toc_depth: 2
-number_sections: true  
+number_sections: true
 df_print: tibble
 fig_caption: true
 html_document:
@@ -55,7 +55,7 @@ samples_blacklist <- c("BPH_337", "PC_4538", "PC_6102", "PC_6864", "CRPC_531")
 
 ## Generate samples data from samples sheet
 ```{r, eval=FALSE}
-rna_coldata <- data.frame(row.names            = rownames(rna_sample_sheet), 
+rna_coldata <- data.frame(row.names            = rownames(rna_sample_sheet),
                           Type                 = factor(gsub("BPH.*", "BPH", trimws(rna_sample_sheet$Tissue.Type))),
                           RNA.Isolation.method = factor(gsub("\\s", "_", gsub("Trizol.*", "Trizol", trimws(rna_sample_sheet$RNA.Isolation.protocol)))),
                           sample               = rownames(rna_sample_sheet))
@@ -103,8 +103,12 @@ rna_dds <- DESeqDataSet(rna_se, design = ~ RNA.Isolation.method + Type)
 ## Remove lowly expressed genes
 ```{r, eval=FALSE}
 rs <- rowSums(assay(rna_dds))
-# histogram!!
+
+hist(rs, "fd")
+
 lower_quartile_thr <- quantile(rs, 0.25)
+ablines(v=lower_quartile_thr, col="red")
+
 rna_dds <- rna_dds[rs > lower_quartile_thr, ] # remove lower quartile
 ```
 
@@ -160,11 +164,12 @@ norm.counts <- log2(norm.counts + 1) - (beta * p)
 assay(rna_dds, "norm.counts") <- norm.counts
 ```
 
-# Filter mithocondrial genes and keep protein coding genes
+## Filter mithocondrial genes and keep protein coding genes
 ```{r, eval=FALSE}
 rna_dds <- rna_dds[rowRanges(rna_dds)$gene_biotype == "protein_coding" & !rowRanges(rna_dds)$allZero & !(rowRanges(rna_dds)$gene_id %in% chrM$gene_id), ]
 ```
 
+## Save
 ```{r, include=FALSE, eval=FALSE}
 save(rna_dds, file = "R_data/RNAdds.RData")
 save(x, file = "R_data/RNA_rcMatrix.RData")
@@ -213,7 +218,7 @@ de_CRPCvBPH <- l[[2]]
 ```
 
 ```{r, include=FALSE, eval=FALSE}
-save(rna_PCvBPH, de_PCvBPH, rna_CRPCvPC, de_CRPCvPC, rna_CRPCvBPH, de_CRPCvBPH, 
+save(rna_PCvBPH, de_PCvBPH, rna_CRPCvPC, de_CRPCvPC, rna_CRPCvBPH, de_CRPCvBPH,
      file = "R_data/RNA_differentiallyExpressed.RData")
 ```
 
@@ -235,7 +240,7 @@ pheatmap(m1, show_rownames = FALSE,
 		absdiff = de_PCvBPH$diff),
 	main = sprintf("PC vs BPH - n = %s", nrow(de_PCvBPH)),
 	scale = "row",
-	filename = "/bmt-data/genomics/projects/atac_workdir/pictures/DEG/PCvBPH_row.pdf",
+	filename = "pictures/DEG/PCvBPH_row.pdf",
 	height = 10,
 	width = 10)
 
@@ -249,7 +254,7 @@ pheatmap(m2, show_rownames = FALSE,
 		absdiff = de_CRPCvPC$diff),
 	main = sprintf("CRPC vs PC - n = %s", nrow(de_CRPCvPC)),
 	scale = "row",
-	filename = "/bmt-data/genomics/projects/atac_workdir/pictures/DEG/CRPCvPC_row.pdf",
+	filename = "pictures/DEG/CRPCvPC_row.pdf",
 	height = 10,
 	width = 10)
 
@@ -257,32 +262,32 @@ pheatmap(m2, show_rownames = FALSE,
 d1 <- cbind(log2FoldChange=de_PCvBPH$log2FoldChange, absolute_median_difference=de_PCvBPH$diff, p.value=de_PCvBPH$padj, m1)
 d2 <- cbind(log2FoldChange=de_CRPCvPC$log2FoldChange, absolute_median_difference=de_CRPCvPC$diff, p.value=de_CRPCvPC$padj, m2)
 
-write.csv(d1, file = "/bmt-data/genomics/projects/atac_workdir/tables/DEG/de_PCvBPH.csv")
-write.csv(d2, file = "/bmt-data/genomics/projects/atac_workdir/tables/DEG/de_CRPCvPC.csv")
+write.csv(d1, file = "tables/DEG/de_PCvBPH.csv")
+write.csv(d2, file = "tables/DEG/de_CRPCvPC.csv")
 ```
 
 # Compute AR activity score
 
 ```{r, eval=FALSE}
-ARSIG <- data.frame(gene_name=c("PSA", "TMPRSS2", "NKX3-1", 
-                                "KLK2", "GNMT", "TMEPAI", 
-                                "MPHOS9", "ZBTB10", "EAF2", 
-                                "BM039", "SARG", "ACSL3", 
-                                "PTGER4", "ABCC4", "NNMT", 
-                                "ADAM7", "FKBP5", "ELL2", 
-                                "MED28", "HERC3", "MAF"), 
-                    gene_id=c("ENSG00000142515", "ENSG00000184012", "ENSG00000167034", 
-                              "ENSG00000167751", "ENSG00000124713", "ENSG00000124225", 
-                              "ENSG00000051825", "ENSG00000205189", "ENSG00000145088", 
-                              "ENSG00000166451", "ENSG00000182795", "ENSG00000123983", 
-                              "ENSG00000171522", "ENSG00000125257", "ENSG00000166741", 
-                              "ENSG00000069206", "ENSG00000096060", "ENSG00000118985", 
-                              "ENSG00000118579", "ENSG00000138641", "ENSG00000178573"), 
+ARSIG <- data.frame(gene_name=c("PSA", "TMPRSS2", "NKX3-1",
+                                "KLK2", "GNMT", "TMEPAI",
+                                "MPHOS9", "ZBTB10", "EAF2",
+                                "BM039", "SARG", "ACSL3",
+                                "PTGER4", "ABCC4", "NNMT",
+                                "ADAM7", "FKBP5", "ELL2",
+                                "MED28", "HERC3", "MAF"),
+                    gene_id=c("ENSG00000142515", "ENSG00000184012", "ENSG00000167034",
+                              "ENSG00000167751", "ENSG00000124713", "ENSG00000124225",
+                              "ENSG00000051825", "ENSG00000205189", "ENSG00000145088",
+                              "ENSG00000166451", "ENSG00000182795", "ENSG00000123983",
+                              "ENSG00000171522", "ENSG00000125257", "ENSG00000166741",
+                              "ENSG00000069206", "ENSG00000096060", "ENSG00000118985",
+                              "ENSG00000118579", "ENSG00000138641", "ENSG00000178573"),
                     stringsAsFactors = FALSE)
 ```
 
-
 ## Compute means and standard deviations
+
 ```{r, eval=FALSE}
 library(matrixStats)
 
@@ -382,8 +387,8 @@ barplot(table(peaks_in_pos$in_pos_group), las = 2, main = "Number of \"pos\" sam
 df <- as.data.frame(cbind(pos=table(peaks_in_pos$V1), neg=table(peaks_in_neg$V1)))
 df$chrom <- rownames(df)
 
-df <- base::within(df, chrom <- factor(chrom, 
-                                       levels = df[order(apply(df[, -3], 
+df <- base::within(df, chrom <- factor(chrom,
+                                       levels = df[order(apply(df[, -3],
                                                                1, function(x) {print(x); sum(x)}), decreasing = TRUE), "chrom"]))
 
 dfm <- melt(df)
@@ -402,8 +407,8 @@ mergeGtrd <- function (dt, gtrd) {
   df <- data.frame(chr   = gsub(pattern = "(chr.*)_[0-9]+_[0-9]+", replacement = "\\1", x = dt[["peak_id"]]),
                    start = gsub(pattern = "chr.*_([0-9]+)_[0-9]+", replacement = "\\1", x = dt[["peak_id"]]),
                    end   = gsub(pattern = "chr.*_[0-9]+_([0-9]+)", replacement = "\\1", x = dt[["peak_id"]]),
-                   #name  = dt[["peak_id"]], 
-                   tmpid = dt[["tmpid"]], 
+                   #name  = dt[["peak_id"]],
+                   tmpid = dt[["tmpid"]],
                    stringsAsFactors = FALSE)
   gr    <- makeGRangesFromDataFrame(df, starts.in.df.are.0based = FALSE, keep.extra.columns = TRUE)
   olaps <- findOverlaps(gtrd, gr, type = "within")
@@ -429,7 +434,7 @@ peaks_in_neg <- mergeGtrd(peaks_in_neg, gtrd_all)
 
 ```{r, eval=FALSE}
 all_tf <- matrix(0, length(unique(gtrd_all$name)),4, dimnames = list(unique(gtrd_all$name),
-                                                                     c("all_pos","all_neg", 
+                                                                     c("all_pos","all_neg",
                                                                        "pca_pos", "pca_neg")))
 
 L <- list(do.call(c, unname(sapply(peaks_in_pos$`gtrd all`,   function(x) unlist(strsplit(x, split=", "))))),
@@ -475,7 +480,7 @@ for(i in seq_along(npeaks)) {
 mat <- data.frame(score=score,npeaks=npeaks)
 mat$type <- gsub("^(PC|BPH|CRPC)_.*","\\1",rownames(mat))
 mat$label <- ifelse(rownames(mat)%in%pos,"pos","neg")
-ggplot(mat, aes(score, npeaks, shape=label, color=type)) + 
+ggplot(mat, aes(score, npeaks, shape=label, color=type)) +
   geom_vline(xintercept = median(score), linetype="dotted") +
   geom_point()
 ggsave("pictures/ARposNeg_ARscore_vs_npeaks.pdf")
