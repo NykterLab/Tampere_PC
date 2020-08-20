@@ -1,0 +1,10 @@
+Package: myhelpers
+Title: Provide functions for computation and visualization of correlations between ATAC-seq and gene expression data as described in [paper]
+Version: 0.0.0.9000
+Authors@R: person("Francesco", "Tabaro", email = "francesco.tabaro@gmail.com", role = c("aut", "cre"))
+Description: What the package does (one paragraph).
+Depends: R (>= 3.5.1)
+License: What license is it under?
+Encoding: UTF-8
+LazyData: true
+RoxygenNote: 6.1.1
