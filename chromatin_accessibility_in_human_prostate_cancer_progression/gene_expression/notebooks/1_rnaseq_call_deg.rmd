@@ -21,16 +21,17 @@ smooth_scroll: false
 ---
 
 ```{r setup}
-knitr::opts_knit$set(root.dir="/bmt-data/genomics//projects//atac_workdir/")
+knitr::opts_knit$set(root.dir="workdir/")
 
 library(DESeq2)
 library(purrr)
+
+library(myhelpers)
 
 ```
 
 # Load Ensembl annotation
 ```{r, eval=FALSE}
-source("R/getAnnotationTable.R")
 ann <- getAnnotationTable()
 ```
 
@@ -65,7 +66,7 @@ rna_coldata <- DataFrame(rna_coldata)
 ## Generate data matrix
 
 ```{r, eval=FALSE}
-rnaseq_folder <- "/bmt-data/genomics/projects/tampere_pc/rna-seq/"
+rnaseq_folder <- "rna-seq/"
 L <- mclapply(rownames(rna_sample_sheet), function(each) {
            fp <- file.path(rnaseq_folder, paste(each, "bamReadsPerGene", "out", "tab", sep = "."))
            table <- read.table(fp, row.names = 1, skip = 4)
@@ -420,8 +421,8 @@ mergeGtrd <- function (dt, gtrd) {
   ret
 }
 
-gtrd_lncap <- import("/bmt-data/genomics/reference/gtrd/gtrd_meta_clusters_prostate_w_names.bed")
-gtrd_all <- import("/bmt-data/genomics/reference/gtrd/gtrd_meta_clusters_all_w_names.bed")
+gtrd_lncap <- import("reference/gtrd/gtrd_meta_clusters_prostate_w_names.bed")
+gtrd_all <- import("reference/gtrd/gtrd_meta_clusters_all_w_names.bed")
 
 peaks_in_pos[, peak_id := paste(V1, V2, V3, sep = "_")]
 peaks_in_pos <- mergeGtrd(peaks_in_pos, gtrd_lncap)

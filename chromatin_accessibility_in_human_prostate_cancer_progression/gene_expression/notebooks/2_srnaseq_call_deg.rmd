@@ -6,7 +6,7 @@ output:
   pdf_document:
   toc: true
 toc_depth: 2
-number_sections: true  
+number_sections: true
 df_print: tibble
 fig_caption: true
 html_document:
@@ -55,12 +55,11 @@ if($0~/>/ && $0~/Homo/){
 ### Annotate samples tag sequences with miRbase names
 
 ```{bash}
-rm /bmt-data/genomics/projects/tampere_pc/smallrna-seq/*.tsv
-cd /sgn-data/csb/datasets/tampere_pca/smallrna-seq/read_counts/
+cd smallrna-seq/read_counts/
 awk 'BEGIN{
   OFS="\t";
   l=30;
-  while((getline line <"/bmt-data/genomics/reference/mirbase_22/mature_hsa.fa")>0){
+  while((getline line <"reference/mirbase_22/mature_hsa.fa")>0){
     if(line~/>/){
       name=substr(line,2);
     }else{
@@ -75,7 +74,7 @@ awk 'BEGIN{
       D["G"line]="G+"name;
       D["C"line]="C+"name;
       D["T"line]="T+"name;
-      
+
       #nl=length(line)+1;
       #if(nl>l) {
       #  l=nl;
@@ -90,9 +89,9 @@ awk 'BEGIN{
     gsub(/tsv/,"other.tsv",other_fn)
   }
   if($3 in D){
-    print $0, D[$3] >>"/bmt-data/genomics/projects/tampere_pc/smallrna-seq/"FILENAME
+    print $0, D[$3] >>"smallrna-seq/processed/"FILENAME
   }else if($2>100 && $1<=l){
-    print $0 >>"/bmt-data/genomics/projects/tampere_pc/smallrna-seq/"other_fn
+    print $0 >>"smallrna-seq/processed/"other_fn
   }
 }' *.tsv
 ```
@@ -100,17 +99,17 @@ awk 'BEGIN{
 #### Check number of mapped tags
 
 ```{bash}
-cd /bmt-data/genomics/projects/tampere_pc/smallrna-seq/
-wc -l /bmt-data/genomics/projects/tampere_pc/smallrna-seq/*mirbase22.tsv
+cd smallrna-seq/processed/
+wc -l smallrna-seq/processed/*mirbase22.tsv
 ```
 
 #### Compute percentage of mapped tags
 
 ```{bash}
-for f in /bmt-data/genomics/projects/tampere_pc/smallrna-seq/*mirbase22.tsv; do
+for f in smallrna-seq/processed/*mirbase22.tsv; do
   orig=$(basename $f);
   orig=${orig/mirbase22.tsv/tsv};
-  op=$(wc -l $f | cut -d" " -f1)/$(cat /sgn-data/csb/datasets/tampere_pca/smallrna-seq/read_counts/$orig | wc -l | cut -d" " -f1);
+  op=$(wc -l $f | cut -d" " -f1)/$(cat smallrna-seq/read_counts/$orig | wc -l | cut -d" " -f1);
   echo $orig $op $(echo $op*100 | bc -l | awk '{printf "%01f%\n", $0}')
 done | sort -k3n
 ```
@@ -119,8 +118,8 @@ done | sort -k3n
 
 ```{python}
 def buildDataMatrix():
-    RAW_READS_DIR="/sgn-data/csb/datasets/tampere_pca/smallrna-seq/reads"
-    ANNOTATED_TSV_DIR="/bmt-data/genomics/projects/tampere_pc/smallrna-seq"
+    RAW_READS_DIR="smallrna-seq/reads"
+    ANNOTATED_TSV_DIR="smallrna-seq/processed"
 
     raw_filenames={x.split(".")[0].split("_")[1]: x.split(".")[0] for x in os.listdir(RAW_READS_DIR) if x != "extra"}
     targets=[os.path.join(ANNOTATED_TSV_DIR,x) for x in os.listdir(ANNOTATED_TSV_DIR)]
@@ -132,7 +131,7 @@ def buildDataMatrix():
 
     for f in targets:
 
-        bn = os.path.basename(f).split(".")[0]   
+        bn = os.path.basename(f).split(".")[0]
 
         if bn in raw_filenames:
             headers.append(bn)
@@ -149,15 +148,15 @@ def buildDataMatrix():
                 if D[name][bn] != "0":
                     sys.stderr.write("[W] Sample %s collapsing %s: %s + %s\n"%(bn,name,D[name][bn],line[1]))
                     D[name][bn] = int(D[name][bn]) + int(line[1])
-                else:         
+                else:
                     D[name][bn]=line[1]
             fid.close()
 
     print(" ".join([" "]+[raw_filenames[x] for x in headers]))
     for k,v in D.iteritems():
         l = []
-        for h in headers:        
-            val = "0"           
+        for h in headers:
+            val = "0"
             if h in v:
                 val = v[h]
             l.append(val)
@@ -197,17 +196,17 @@ awk 'BEGIN{
   for(i in blk){
     print "Not found "blk[i] | "cat 1>&2"
   }
-}' /bmt-data/genomics/projects/atac_workdir/tables/smallrna_mirbase22.txt \
->/bmt-data/genomics/projects/atac_workdir/references/smallrna_mirbase22.gff3
+}' tables/smallrna_mirbase22.txt \
+> references/smallrna_mirbase22.gff3
 ```
 
 
 ### Convert gff3 to bed
 
 ```{bash}
-cat /bmt-data/genomics/projects/atac_workdir/references/smallrna_mirbase22.gff3 \
+cat references/smallrna_mirbase22.gff3 \
 | awk 'BEGIN{OFS="\t"}{match($0,/^.*Name=(.*);.*$/,arr);print $1,$4,$5,arr[1],"0",$7}' \
->/bmt-data/genomics/projects/atac_workdir/references/smallrna_mirbase22.bed
+> references/smallrna_mirbase22.bed
 ```
 
 ## Differential expression detection
@@ -224,20 +223,19 @@ deps <- c(
   "grid",
   "gridExtra",
   "pheatmap",
-  "cowplot", 
+  "cowplot",
   "ggrepel")
 
 sapply(deps, loadPackage)
-setwd("/bmt-data/genomics/projects/atac_workdir")
+
 samples_blacklist <- c("PC_6864", "CRPC_531")
 ```
 
 ### Import data
 
 ```{r}
-SRNA_DATAMATRIX_PATH <- "/bmt-data/genomics/projects/atac_workdir/tables/smallrna_mirbase22.txt"
-SRNA_GFF <- "/bmt-data/genomics/projects/atac_workdir/references/smallrna_mirbase22.gff3"
-# SRNA_BED <- "/bmt-data/genomics/projects/atac_workdir/references/smallrna_mirbase22.bed"
+SRNA_DATAMATRIX_PATH <- "tables/smallrna_mirbase22.txt"
+SRNA_GFF <- "references/smallrna_mirbase22.gff3"
 
 srna_ann <- import(SRNA_GFF)
 srna_ann <- sortSeqlevels(srna_ann, X.is.sexchrom=T)
@@ -253,7 +251,7 @@ nrow(srna_data)
 srna_data <- srna_data[match(srna_ann$Name, rownames(srna_data), nomatch=0),]
 
 srna_se <- SummarizedExperiment(assays = SimpleList(counts = srna_data), rowRanges = srna_ann)
-colData(srna_se) <- DataFrame(row.names=colnames(srna_data),                             
+colData(srna_se) <- DataFrame(row.names=colnames(srna_data),
                               type=as.factor(gsub("^((?:BPH|PC|CRPC)).*$","\\1",
                                                   colnames(srna_data))))
 
@@ -274,20 +272,20 @@ sum(is.na(rownames(srna_se_filter)))
 ```{r}
 doBoxplot <- function (mat, main, legend = FALSE){
   require("ggplot2")
-  
+
   df <- melt(mat)
   df$type<-sub(x=df$X2, pattern = "^((?:BPH|PC|CRPC)).*$", replacement = "\\1")
 
   head(df)
 
-  p1 <- ggplot(df,aes(X2,value,fill=type)) + 
-    geom_boxplot(show.legend=legend) + 
-    xlab("Samples") + 
+  p1 <- ggplot(df,aes(X2,value,fill=type)) +
+    geom_boxplot(show.legend=legend) +
+    xlab("Samples") +
     ylab("log2(count + 1)") +
     ggtitle(main) +
-    theme_bw() + 
-    theme(axis.text.x = element_text(angle=90), 
-        axis.ticks.x = element_blank()) 
+    theme_bw() +
+    theme(axis.text.x = element_text(angle=90),
+        axis.ticks.x = element_blank())
 
   return(p1)
 }
@@ -296,7 +294,6 @@ doBoxplot <- function (mat, main, legend = FALSE){
 
 ```{r}
 library("cowplot")
-source("R/median_of_ratios.R")
 
 p <- c(0,1,1.5,2,3,4,5)
 coef <- data.frame(row.names = colnames(srna_se_filter))
@@ -307,9 +304,9 @@ plots[["-1"]] <- doBoxplot(log2(assay(srna_se_filter)+1), "Raw data", legend = T
 for(i in p){
   MOR <- mor(assay(srna_se_filter), i, return_coefficients = T)
   coef[,as.character(i)] <- MOR$coef
-  
+
   plots[[as.character(i)]] <- doBoxplot(log2(MOR$norm+1), sprintf("Blacklist removed - MOR_param = %s", i), legend = TRUE)
-                                                     
+
   mats[[as.character(i)]] <- MOR$norm
 }
 
@@ -321,9 +318,6 @@ ggsave(filename="pictures/mor_mirna.pdf", plot = arrangeGrob(grobs = plots, nrow
 
 
 ```{r}
-source("R/median_of_ratios.R")
-source("R/quantile_normalization.R")
-
 assay(srna_se_filter, "norm.counts") <- mor(assay(srna_se_filter),4)
 assay(srna_se_filter,"norm.counts.quantile") <- quantile.normalize(assay(srna_se_filter))
 
@@ -340,16 +334,16 @@ doTable <- function (slot_name) {
   bph <- colnames(srna_se_filter)[grepl(pattern = "^BPH", x = colnames(srna_se_filter))]
   pc <- colnames(srna_se_filter)[grepl(pattern = "^PC", x = colnames(srna_se_filter))]
   crpc <- colnames(srna_se_filter)[grepl(pattern = "^CRPC", x = colnames(srna_se_filter))]
-  
+
   dat <- assay(srna_se_filter, slot_name)
-  
+
   PCvBPHdelta <- apply(dat[,pc],1,median) - apply(dat[,bph],1,median)
   PCvBPHlfc <- log2(apply(dat[,pc],1,median)+1) - log2(apply(dat[,bph],1,median)+1)
-  
+
     PCvBPHp <- apply(dat,1,function(row){
       tryCatch({
-        t.test(row[pc],row[bph], exact=F)$p.value 
-#     wilcox.test(row[pc],row[bph], exact=F)$p.value 
+        t.test(row[pc],row[bph], exact=F)$p.value
+#     wilcox.test(row[pc],row[bph], exact=F)$p.value
       }, error = function (er) {
         print(row[pc])
         print(row[bph])
@@ -357,20 +351,20 @@ doTable <- function (slot_name) {
       })
     })
     PCvBPHp <- p.adjust(PCvBPHp, method = "fdr")
-  
+
   CRPCvPCdelta <- apply(assay(srna_se_filter,slot_name)[,crpc],1,median) - apply(assay(srna_se_filter,slot_name)[,pc],1,median)
   CRPCvPClfc <- log2(apply(assay(srna_se_filter,slot_name)[,crpc],1,median) + 1) - log2(apply(assay(srna_se_filter,slot_name)[,pc],1,median)+1)
   CRPCvPCp <- apply(assay(srna_se_filter,slot_name), 1, function(row) t.test(row[crpc],row[pc], exact=F)$p.value)
   CRPCvPCp <- p.adjust(CRPCvPCp, method="fdr")
 
-  res <- data.frame(row.names=rownames(srna_se_filter), 
+  res <- data.frame(row.names=rownames(srna_se_filter),
                     PCvBPHdelta=PCvBPHdelta,
                     PCvBPHlfc=PCvBPHlfc,
                     PCvBPHp=PCvBPHp,
                     CRPCvPCdelta=CRPCvPCdelta,
                     CRPCvPClfc=CRPCvPClfc,
                     CRPCvPCp=CRPCvPCp)
-  
+
   res
 }
 
@@ -389,7 +383,7 @@ res.quantile <- doTable("norm.counts.quantile")
 DE <- callDE(res)
 DE.quantile <- callDE(res.quantile)
 
-data.frame(row.name=c("PCvBPH", "CRPCvPC"), 
+data.frame(row.name=c("PCvBPH", "CRPCvPC"),
            DE.mor = c(nrow(DE$PCvBPH), nrow(DE$CRPCvPC)),
            DE.quantile = c(nrow(DE.quantile$PCvPC), nrow(DE.quantile$CRPCvPC)))
 ```
@@ -400,9 +394,9 @@ DE$PCvBPH$gt <- as.factor(rownames(DE$PCvBPH) %in% tolower(rownames(PCvBPH_de_gr
 
 options(repr.plot.widht=10, repr.plot.height=7)
 pheatmap(log2(assay(se1,"norm.counts")+1), scale ="none",
-         annotation_col=as.data.frame(colData(se1)), 
+         annotation_col=as.data.frame(colData(se1)),
          main = sprintf("PCvBPH DE - n = %s", nrow(DE$PCvBPH)),
-         annotation_row=DE$PCvBPH)  
+         annotation_row=DE$PCvBPH)
 ```
 
 ```{r}
@@ -411,9 +405,9 @@ DE$CRPCvPC$gt <- as.factor(rownames(DE$CRPCvPC) %in% tolower(rownames(CRPCvPC_de
 
 options(repr.plot.widht=10, repr.plot.height=7)
 pheatmap(log2(assay(se2, "norm.counts")+1), scale = "none",
-         annotation_col=as.data.frame(colData(se2)), 
+         annotation_col=as.data.frame(colData(se2)),
          main = sprintf("CRPCvPC - n = %s", nrow(DE$CRPCvPC)),
-         annotation_row=DE$CRPCvPC)  
+         annotation_row=DE$CRPCvPC)
 ```
 
 
