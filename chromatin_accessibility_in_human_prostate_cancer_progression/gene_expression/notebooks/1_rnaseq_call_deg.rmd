@@ -1,0 +1,488 @@
+---
+title: 'Tampere PC: Call differentially expressed genes from RNA-seq data'
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+author: "Francesco Tabaro"
+output:
+  pdf_document:
+  toc: true
+toc_depth: 2
+number_sections: true
+df_print: tibble
+fig_caption: true
+html_document:
+  toc: true
+toc_depth: 2
+number_sections: true
+fig_caption: true
+df_print: paged
+toc_float:
+  collapsed: false
+smooth_scroll: false
+---
+
+```{r setup}
+knitr::opts_knit$set(root.dir="workdir/")
+
+library(DESeq2)
+library(purrr)
+
+library(myhelpers)
+
+```
+
+# Load Ensembl annotation
+```{r, eval=FALSE}
+ann <- getAnnotationTable()
+```
+
+# Load sample sheets
+
+## RNA-seq
+```{r, eval=FALSE}
+rna_sample_sheet <- read.csv("clinical_27_04_2012-1-rnaseq.csv", row.names="Sample.ID")
+```
+
+## ATAC-seq
+```{r, eval=FALSE}
+atac_sample_sheet <- read.table("sample_sheet.csv", header = T, sep = ",", strip.white = T, row.names="Sample.name")
+```
+
+# Set blacklist
+```{r, eval=FALSE}
+samples_blacklist <- c("BPH_337", "PC_4538", "PC_6102", "PC_6864", "CRPC_531")
+```
+
+# Genearate SummarizedExperiment object
+
+## Generate samples data from samples sheet
+```{r, eval=FALSE}
+rna_coldata <- data.frame(row.names            = rownames(rna_sample_sheet),
+                          Type                 = factor(gsub("BPH.*", "BPH", trimws(rna_sample_sheet$Tissue.Type))),
+                          RNA.Isolation.method = factor(gsub("\\s", "_", gsub("Trizol.*", "Trizol", trimws(rna_sample_sheet$RNA.Isolation.protocol)))),
+                          sample               = rownames(rna_sample_sheet))
+rna_coldata <- DataFrame(rna_coldata)
+```
+
+## Generate data matrix
+
+```{r, eval=FALSE}
+rnaseq_folder <- "rna-seq/"
+L <- mclapply(rownames(rna_sample_sheet), function(each) {
+           fp <- file.path(rnaseq_folder, paste(each, "bamReadsPerGene", "out", "tab", sep = "."))
+           table <- read.table(fp, row.names = 1, skip = 4)
+           table <- subset(table, select = 1)
+           colnames(table) <- each
+           return(table)
+         }, mc.cores = NCORES)
+
+mat <- Reduce(function (x,y) {
+  res <-merge(x,y, by = 0)
+  rownames(res) <- res[,1]
+  return(res[,-1])
+}, L)
+
+x <- as.matrix (mat)
+# x <- mat[,!colnames(x) %in% samples_blacklist]
+```
+
+## Generate gene ranges
+```{r, eval=FALSE}
+rowranges <- ann[ann$gene_id %in% rownames(x) & ann$type == "gene"]
+```
+
+## Collect data matrix, samples data and gene ranges into a SummarizedExperiment object
+```{r, eval=FALSE}
+x <- x[match(rownames(x), rowranges$gene_id), match(colnames(x), rownames(rna_coldata))]
+rna_se <- SummarizedExperiment(assays = SimpleList(counts = x), rowRanges = rowranges, colData = rna_coldata)
+```
+
+# Run DESeq2
+```{r, eval=FALSE}
+rna_dds <- DESeqDataSet(rna_se, design = ~ RNA.Isolation.method + Type)
+```
+
+## Remove lowly expressed genes
+```{r, eval=FALSE}
+rs <- rowSums(assay(rna_dds))
+
+hist(rs, "fd")
+
+lower_quartile_thr <- quantile(rs, 0.25)
+ablines(v=lower_quartile_thr, col="red")
+
+rna_dds <- rna_dds[rs > lower_quartile_thr, ] # remove lower quartile
+```
+
+## Remove low quality samples
+```{r, eval=FALSE}
+rna_dds <- rna_dds[,!colnames(rna_dds) %in% samples_blacklist]
+```
+
+## Keep samples for which we have ATAC-seq data
+```{r, eval=FALSE}
+rna_dds <- rna_dds[,colnames(rna_dds) %in% rownames(atac_sample_sheet)]
+```
+
+## Collapse replicates
+```{r, eval=FALSE}
+rna_dds <- collapseReplicates(rna_dds, rna_dds$sample) # collapse technical replicates
+```
+
+## Run DESeq2 fitting
+```{r, eval=FALSE}
+rna_dds <- DESeq(rna_dds, fitType = "local", parallel = F, quiet = F)
+```
+
+## Compute Trizol normalization
+
+### Get beta factors
+```{r, eval=FALSE}
+beta <- coef(rna_dds)[, "RNA.Isolation.method_Trizol_vs_Qiagen_AllPrep"]
+beta[is.na(beta)] <- 0
+```
+
+### Generate design matrix
+```{r, eval=FALSE}
+p <- colData(rna_dds)$RNA.Isolation.method
+p <- sapply(p, function(each) ifelse(each == "Trizol", TRUE, FALSE))
+p <- matrix(rep(p, times = length(beta)), nrow = length(beta), byrow = T)
+```
+
+### Compute normalization factors
+```{r, eval=FALSE}
+sf <- sizeFactors(rna_dds)
+sf <- matrix(rep(sf, times = nrow(rna_dds)), nrow = nrow(rna_dds), byrow = T)
+```
+
+### Perform normalization
+```{r, eval=FALSE}
+norm.counts <- counts(rna_dds, normalized = F) / sf
+norm.counts <- log2(norm.counts + 1) - (beta * p)
+```
+
+### Assign new slot in DESeqDataset object
+```{r, eval=FALSE}
+assay(rna_dds, "norm.counts") <- norm.counts
+```
+
+## Filter mithocondrial genes and keep protein coding genes
+```{r, eval=FALSE}
+rna_dds <- rna_dds[rowRanges(rna_dds)$gene_biotype == "protein_coding" & !rowRanges(rna_dds)$allZero & !(rowRanges(rna_dds)$gene_id %in% chrM$gene_id), ]
+```
+
+## Save
+```{r, include=FALSE, eval=FALSE}
+save(rna_dds, file = "R_data/RNAdds.RData")
+save(x, file = "R_data/RNA_rcMatrix.RData")
+```
+
+# Call differentially expressed genes
+
+## Set thresholds
+```{r, eval=FALSE}
+P_THR   <- 0.05
+LFC_THR <- 1
+DIFF_THR <- 180
+```
+
+
+## Define helper
+```{r, eval=FALSE}
+get_deg <- function (contrast) {
+
+  sample_set1 <- grepl(x = colnames(rna_dds), pattern = sprintf("^%s", contrast[2]))
+  sample_set2 <- grepl(x = colnames(rna_dds), pattern = sprintf("^%s", contrast[3]))
+
+  res <- results(rna_dds, contrast = contrast, alpha = P_THR)
+  res$diff <- apply(2 ^ assay(rna_dds, "norm.counts")[, sample_set1], 1, median, na.rm = T) - apply(2 ^ assay(rna_dds, "norm.counts")[, sample_set2], 1, median, na.rm = T)
+
+  sbst <- subset(res, padj < P_THR & abs(log2FoldChange) > LFC_THR & abs(diff) > DIFF_THR)
+
+  return(list(res, sbst))
+}
+
+```
+
+## Call
+```{r, eval=FALSE}
+l <- get_deg(c("Type", "PC",   "BPH"))
+rna_PCvBPH <- l[[1]]
+de_PCvBPH <- l[[2]]
+
+l <- get_deg(c("Type", "CRPC",   "PC"))
+rna_CRPCvPC <- l[[1]]
+de_CRPCvPC <- l[[2]]
+
+l <- get_deg(c("Type", "CRPC",   "BPH"))
+rna_CRPCvBPH <- l[[1]]
+de_CRPCvBPH <- l[[2]]
+```
+
+```{r, include=FALSE, eval=FALSE}
+save(rna_PCvBPH, de_PCvBPH, rna_CRPCvPC, de_CRPCvPC, rna_CRPCvBPH, de_CRPCvBPH,
+     file = "R_data/RNA_differentiallyExpressed.RData")
+```
+
+# Visualizations
+
+```{r, eval=FALSE}
+library(pheatmap)
+
+m1 <- assay(rna_dds, "norm.counts")[rownames(de_PCvBPH),]
+m2 <- assay(rna_dds, "norm.counts")[rownames(de_CRPCvPC),]
+
+pheatmap(m1, show_rownames = FALSE,
+	annotation_col = data.frame(row.names = colnames(m1),
+		type = colData(rna_dds)[,"Type"],
+		protocol = colData(rna_dds)[,"RNA.Isolation.method"]),
+	annotation_row = data.frame(row.names = rownames(m1),
+		lfc = de_PCvBPH$log2FoldChange,
+		p.val = de_PCvBPH$padj,
+		absdiff = de_PCvBPH$diff),
+	main = sprintf("PC vs BPH - n = %s", nrow(de_PCvBPH)),
+	scale = "row",
+	filename = "pictures/DEG/PCvBPH_row.pdf",
+	height = 10,
+	width = 10)
+
+pheatmap(m2, show_rownames = FALSE,
+	annotation_col = data.frame(row.names = colnames(m2),
+		type = colData(rna_dds)[,"Type"],
+		protocol = colData(rna_dds)[,"RNA.Isolation.method"]),
+	annotation_row = data.frame(row.names = rownames(m2),
+		lfc = de_CRPCvPC$log2FoldChange,
+		p.val = de_CRPCvPC$padj,
+		absdiff = de_CRPCvPC$diff),
+	main = sprintf("CRPC vs PC - n = %s", nrow(de_CRPCvPC)),
+	scale = "row",
+	filename = "pictures/DEG/CRPCvPC_row.pdf",
+	height = 10,
+	width = 10)
+
+
+d1 <- cbind(log2FoldChange=de_PCvBPH$log2FoldChange, absolute_median_difference=de_PCvBPH$diff, p.value=de_PCvBPH$padj, m1)
+d2 <- cbind(log2FoldChange=de_CRPCvPC$log2FoldChange, absolute_median_difference=de_CRPCvPC$diff, p.value=de_CRPCvPC$padj, m2)
+
+write.csv(d1, file = "tables/DEG/de_PCvBPH.csv")
+write.csv(d2, file = "tables/DEG/de_CRPCvPC.csv")
+```
+
+# Compute AR activity score
+
+```{r, eval=FALSE}
+ARSIG <- data.frame(gene_name=c("PSA", "TMPRSS2", "NKX3-1",
+                                "KLK2", "GNMT", "TMEPAI",
+                                "MPHOS9", "ZBTB10", "EAF2",
+                                "BM039", "SARG", "ACSL3",
+                                "PTGER4", "ABCC4", "NNMT",
+                                "ADAM7", "FKBP5", "ELL2",
+                                "MED28", "HERC3", "MAF"),
+                    gene_id=c("ENSG00000142515", "ENSG00000184012", "ENSG00000167034",
+                              "ENSG00000167751", "ENSG00000124713", "ENSG00000124225",
+                              "ENSG00000051825", "ENSG00000205189", "ENSG00000145088",
+                              "ENSG00000166451", "ENSG00000182795", "ENSG00000123983",
+                              "ENSG00000171522", "ENSG00000125257", "ENSG00000166741",
+                              "ENSG00000069206", "ENSG00000096060", "ENSG00000118985",
+                              "ENSG00000118579", "ENSG00000138641", "ENSG00000178573"),
+                    stringsAsFactors = FALSE)
+```
+
+## Compute means and standard deviations
+
+```{r, eval=FALSE}
+library(matrixStats)
+
+sele <- rna_dds[ARSIG$gene_id,]
+
+mu <- rowMeans(assay(sele,"norm.counts"))
+mu <- matrix(rep(mu, ncol(sele)), nrow(sele), ncol(sele))
+
+std <- rowSds(assay(sele,"norm.counts"))
+std <- matrix(rep(std, ncol(sele)), nrow(sele), ncol(sele))
+```
+
+## Compute Z-scores
+```{r, eval=FALSE}
+assay(sele,"z-score") <- (assay(sele,"norm.counts") - mu) / std
+```
+
+## Compute sample-specific score
+```{r, eval=FALSE}
+score <- rowSums(t(assay(sele,"z-score")))
+# hist(score, "fd")
+
+```
+
+## Split samples by score
+```{r, eval=FALSE}
+score
+m <- median(score)
+pos <- names(score)[score >= m]
+cat("pos\n")
+table(gsub("^(PC|BPH|CRPC)_.*", "\\1", pos))
+neg <- names(score)[score < m]
+cat("neg\n")
+table(gsub("^(PC|BPH|CRPC)_.*", "\\1", neg))
+
+df <- data.frame(row.names = colnames(rna_dds))
+df$score_label <- ifelse(rownames(df)%in%pos,"pos","neg")
+df$score <- score[match(rownames(df),names(score))]
+df$isolation.method <- colData(sele)$RNA.Isolation.method[match(rownames(colData(sele)),rownames(df))]
+df$type <- colData(sele)$Type[match(rownames(colData(sele)),rownames(df))]
+mat <- assay(sele,"norm.counts")
+rownames(mat) <- ARSIG[match(rownames(mat),ARSIG$gene_id), "gene_name"]
+pheatmap(mat, annotation_col = df, scale = "none")
+
+mat <- log2(counts(sele) + 1)
+rownames(mat) <- ARSIG[match(rownames(mat),ARSIG$gene_id), "gene_name"]
+pheatmap(mat, annotation_col = df)
+
+
+```
+
+```{r, eval=FALSE}
+d <- density(assay(sele,"z-score"), bw = 0.3)
+plot(d, xlim = range(score))
+abline(v=m)
+points(score, rep(0,length(score)))
+```
+
+```{r, eval=FALSE}
+tmp <- merge(df, atac_sample_sheet, by = 0, all.x = T)
+table(subset(tmp,select=c("Overexpr", "score_label")))
+```
+
+
+```{r, eval=FALSE}
+library(data.table)
+NCORES <- parallel::detectCores()
+setDTthreads(NCORES)
+peaks <- fread("heterogeneity/peaks_and_their_corresponding_samples.tsv")
+
+countFun <- function(i, grp) {
+  each <- unique(sprintf("^%s$", unlist(strsplit(as.character(peaks[i,"V4"]), split = ", ", fixed = TRUE))))
+  sum(sapply(each,grepl, x = grp))
+}
+
+countFun2 <- function(i) {
+  each <- unique(sprintf("^%s$", unlist(strsplit(as.character(peaks[i,"V4"]), split = ", ", fixed = TRUE))))
+  return(length(each))
+}
+
+peaks[,`:=`(nsamples=simplify2array(mclapply(seq(nrow(peaks)), countFun2, mc.cores = NCORES)),
+            in_pos_group=simplify2array(mclapply(seq(nrow(peaks)), countFun, grp = pos, mc.cores = NCORES)),
+            in_neg_group=simplify2array(mclapply(seq(nrow(peaks)), countFun, grp = neg, mc.cores = NCORES)))]
+
+peaks_in_pos <- peaks[in_pos_group > 0 & in_neg_group == 0]
+peaks_in_neg <- peaks[in_pos_group == 0 & in_neg_group > 0]
+
+```
+
+```{r, eval=FALSE}
+par(mfrow=c(2,1))
+barplot(table(peaks_in_neg$in_neg_group), las = 2, main = "Number of \"neg\" samples in each peak")
+barplot(table(peaks_in_pos$in_pos_group), las = 2, main = "Number of \"pos\" samples in each peak")
+```
+
+```{r, eval=FALSE}
+df <- as.data.frame(cbind(pos=table(peaks_in_pos$V1), neg=table(peaks_in_neg$V1)))
+df$chrom <- rownames(df)
+
+df <- base::within(df, chrom <- factor(chrom,
+                                       levels = df[order(apply(df[, -3],
+                                                               1, function(x) {print(x); sum(x)}), decreasing = TRUE), "chrom"]))
+
+dfm <- melt(df)
+
+ggplot(dfm, aes(chrom, value, fill = variable)) +
+  geom_bar(stat="identity", position = "dodge") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r, eval=FALSE}
+mergeGtrd <- function (dt, gtrd) {
+  # dt[,tmpid := paste0(peak_id,gene_id)]
+  dt[,tmpid := peak_id]
+  gtrd_colname <- gsub("_", " ", deparse(substitute(gtrd)))
+  df <- data.frame(chr   = gsub(pattern = "(chr.*)_[0-9]+_[0-9]+", replacement = "\\1", x = dt[["peak_id"]]),
+                   start = gsub(pattern = "chr.*_([0-9]+)_[0-9]+", replacement = "\\1", x = dt[["peak_id"]]),
+                   end   = gsub(pattern = "chr.*_[0-9]+_([0-9]+)", replacement = "\\1", x = dt[["peak_id"]]),
+                   #name  = dt[["peak_id"]],
+                   tmpid = dt[["tmpid"]],
+                   stringsAsFactors = FALSE)
+  gr    <- makeGRangesFromDataFrame(df, starts.in.df.are.0based = FALSE, keep.extra.columns = TRUE)
+  olaps <- findOverlaps(gtrd, gr, type = "within")
+  tf_df <- data.table(tmpid = gr$tmpid[subjectHits(olaps)], gtrd_tf = gtrd$name[queryHits(olaps)])
+  tf_df <- tf_df[, paste(unique(gtrd_tf), collapse = ", "), by = tmpid]
+  names(tf_df) <- c("tmpid", gtrd_colname)
+  ret <- merge(dt, tf_df, by = "tmpid",  all.x = TRUE)
+  ret[,tmpid:=NULL]
+  ret
+}
+
+gtrd_lncap <- import("reference/gtrd/gtrd_meta_clusters_prostate_w_names.bed")
+gtrd_all <- import("reference/gtrd/gtrd_meta_clusters_all_w_names.bed")
+
+peaks_in_pos[, peak_id := paste(V1, V2, V3, sep = "_")]
+peaks_in_pos <- mergeGtrd(peaks_in_pos, gtrd_lncap)
+peaks_in_pos <- mergeGtrd(peaks_in_pos, gtrd_all)
+
+peaks_in_neg[, peak_id := paste(V1, V2, V3, sep = "_")]
+peaks_in_neg <- mergeGtrd(peaks_in_neg, gtrd_lncap)
+peaks_in_neg <- mergeGtrd(peaks_in_neg, gtrd_all)
+```
+
+```{r, eval=FALSE}
+all_tf <- matrix(0, length(unique(gtrd_all$name)),4, dimnames = list(unique(gtrd_all$name),
+                                                                     c("all_pos","all_neg",
+                                                                       "pca_pos", "pca_neg")))
+
+L <- list(do.call(c, unname(sapply(peaks_in_pos$`gtrd all`,   function(x) unlist(strsplit(x, split=", "))))),
+          do.call(c, unname(sapply(peaks_in_neg$`gtrd all`,   function(x) unlist(strsplit(x, split=", "))))),
+          do.call(c, unname(sapply(peaks_in_pos$`gtrd lncap`, function(x) unlist(strsplit(x, split=", "))))),
+          do.call(c, unname(sapply(peaks_in_neg$`gtrd lncap`, function(x) unlist(strsplit(x, split=", "))))))
+
+for (i in seq(nrow(all_tf))) {
+  tf <- sprintf("^%s$", rownames(all_tf)[i])
+  all_tf[i, 1] <- sum(grepl(pattern = tf, x = L[[1]]), na.rm = TRUE)
+  all_tf[i, 2] <- sum(grepl(pattern = tf, x = L[[2]]), na.rm = TRUE)
+  all_tf[i, 3] <- sum(grepl(pattern = tf, x = L[[3]]), na.rm = TRUE)
+  all_tf[i, 4] <- sum(grepl(pattern = tf, x = L[[4]]), na.rm = TRUE)
+}
+```
+
+```{r, eval=FALSE}
+all_tf <- as.data.frame(all_tf)
+all_tf$tf <- rownames(all_tf)
+all_tf <- base::within(all_tf, tf <- factor(tf, levels = tf[order(apply(all_tf[,-which(colnames(all_tf) == "tf")], 1, function(x) { sum(x[c(3,4)]) }), decreasing = TRUE)]))
+all_tf <- subset(all_tf, tf %in% levels(tf)[1:30])
+
+m <- melt(all_tf)
+m$gtrd <- gsub("^(.*)_.*", "\\1", m$variable)
+m$set <- gsub("^.*_(.*)", "\\1", m$variable)
+
+ggplot(m,aes(tf, value, fill=set)) +
+  geom_bar(position="dodge", stat="identity") +
+  facet_grid(~gtrd) +
+  theme(axis.text.x = element_text(angle=60,hjust=1,size = 8))
+ggsave("pictures/ARposNeg_TFBSoccurencies.pdf", width = 9)
+```
+
+```{r, eval=FALSE}
+npeaks <- setNames(rep(0,ncol(rna_dds)), colnames(rna_dds))
+
+allp <- do.call(c, unname(sapply(peaks$V4, function(x) unlist(strsplit(x, split = ", ")))))
+for(i in seq_along(npeaks)) {
+  samp <- names(npeaks)[i]
+  npeaks[i] <- sum(grepl(samp, allp), na.rm=T)
+}
+
+mat <- data.frame(score=score,npeaks=npeaks)
+mat$type <- gsub("^(PC|BPH|CRPC)_.*","\\1",rownames(mat))
+mat$label <- ifelse(rownames(mat)%in%pos,"pos","neg")
+ggplot(mat, aes(score, npeaks, shape=label, color=type)) +
+  geom_vline(xintercept = median(score), linetype="dotted") +
+  geom_point()
+ggsave("pictures/ARposNeg_ARscore_vs_npeaks.pdf")
+```
