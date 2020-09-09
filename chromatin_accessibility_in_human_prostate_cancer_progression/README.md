@@ -7,4 +7,5 @@ J. Uusi-Mäkelä, E. Afyounian, F. Tabaro, T. Häkkinen, A. Lussana, A. Shcherba
 ## Repository structure
 
 - `gene_expression`: this folder contains code used to call differentially expressed genes and the integrated analysis with ATAC-seq and ChIP-seq data from GTRD.
+- `bpnet`: this folder contains code used to generate the configuration files needed to train BPNET models of chromatin accessibility.
 

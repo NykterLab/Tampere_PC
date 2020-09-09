@@ -1,0 +1,45 @@
+TFs:
+    - AR
+    - FOXA1
+    - HOXB13
+    - ERG
+
+samples:
+    - BPH_337
+    - BPH_456
+    - BPH_651
+    - BPH_652
+    - BPH_656
+    - BPH_659
+    - BPH_671
+    - BPH_677
+    - BPH_688
+    - BPH_689
+    - BPH_701
+    - CRPC_261
+    - CRPC_278
+    - CRPC_305
+    - CRPC_348
+    - CRPC_435
+    - CRPC_489
+    - CRPC_539
+    - CRPC_541
+    - CRPC_542
+    - CRPC_543
+    - CRPC_697
+    - PC_12517
+    - PC_14670
+    - PC_15420
+    - PC_15760
+    - PC_17163
+    - PC_17447
+    - PC_18307
+    - PC_19403
+    - PC_470
+    - PC_4980
+    - PC_6174
+    - PC_6488
+    - PC_7875
+    - PC_8131
+    - PC_8438
+    - PC_9324
