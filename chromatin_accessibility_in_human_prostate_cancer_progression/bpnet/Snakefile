@@ -1,0 +1,50 @@
+configfile: "config.yml"
+
+rule generate_all_config_and_dataspecs_files:
+    input:
+        VCaP_config = expand("model_config/atac_seq/VCaP/VCaP_{TF}.gin", TF=config["TFs"]),
+        tampere_pc_config = expand("model_config/atac_seq/tampere_pc/{sample}_{TF}.gin", sample=config["samples"], TF=config["TFs"]),
+        VCaP_dataspecs = expand("model_dataspec/atac_seq/VCaP/VCaP_{TF}.yml", TF=config["TFs"]),
+        tampere_pc_dataspecs = expand("model_dataspec/atac_seq/tampere_pc/{sample}_{TF}.yml", sample=config["samples"], TF=config["TFs"])
+
+rule generate_VCaP_config_file:
+    input:
+        "model_config/atac_seq/VCaP/templates/VCaP_TF.gin"
+    output:
+        "model_config/atac_seq/VCaP/VCaP_{TF}.gin"
+    params:
+        TF = lambda wildcards: wildcards.TF
+    shell:
+        "cat {input} | sed 's/TF/{params.TF}/g' > {output}"
+
+rule generate_clinical_sample_config_file:
+    input:
+        "model_config/atac_seq/tampere_pc/templates/SAMPLE_TF.gin"
+    output:
+        "model_config/atac_seq/tampere_pc/{sample}_{TF}.gin"
+    params:
+        TF = lambda wildcards: wildcards.TF,
+        sample = lambda wildcards: wildcards.sample
+    shell:
+        "cat {input} | sed 's/TF/{params.TF}/g; s/SAMPLE/{params.sample}/g' > {output}"
+
+rule generate_VCaP_dataspecs_file:
+    input:
+        "model_dataspec/atac_seq/VCaP/templates/VCaP_TF.yml"
+    output:
+        "model_dataspec/atac_seq/VCaP/VCaP_{TF}.yml"
+    params:
+        TF = lambda wildcards: wildcards.TF
+    shell:
+        "cat {input} | sed 's/TF/{params.TF}/g' > {output}"
+
+rule generate_clinical_sample_dataspecs_file:
+    input:
+        "model_dataspec/atac_seq/tampere_pc/templates/SAMPLE_TF.yml"
+    output:
+        "model_dataspec/atac_seq/tampere_pc/{sample}_{TF}.yml"
+    params:
+        TF = lambda wildcards: wildcards.TF,
+        sample = lambda wildcards: wildcards.sample
+    shell:
+        "cat {input} | sed 's/TF/{params.TF}/g; s/SAMPLE/{params.sample}/g' > {output}"
