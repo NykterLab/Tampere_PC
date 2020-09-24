@@ -1,4 +1,26 @@
+## Alessandro Lussana
+## Computational Biology Group - Nykter Lab
+## Faculty of medicine and health technology
+## Tampere University
+## September 2020
+
+## alessandro.lussana@protonmail.com
+## alessandro.lussana@tuni.fi
+## alessandro.lussana@hsr.it
+## alessandro.lussana@studio.unibo.it
+## alessandro.lussana@edu.unito.it
+
 configfile: "config.yml"
+
+rule all:
+    input:
+        chip_seq_VCaP="models/chip_seq/VCaP_SRA012454/SAMN00011193_BPNET_model/modisco/AR/tomtom_report.md",
+        atac_seq_VCaP=expand("models/atac_seq/VCaP/VCaP_{TF}_BPNET_model/modisco/{TF}/tomtom_report.md", TF=config["TFs"]),
+        atac_seq_PC=expand("models/atac_seq/tampere_pc/{sample}_{TF}_BPNET_model/modisco/{TF}/tomtom_report.md", TF=config["TFs"], sample=config["samples"])
+
+##########################################
+### Generate BPNET configuration files ###
+##########################################
 
 rule generate_all_config_and_dataspecs_files:
     input:
@@ -48,3 +70,556 @@ rule generate_clinical_sample_dataspecs_file:
         sample = lambda wildcards: wildcards.sample
     shell:
         "cat {input} | sed 's/TF/{params.TF}/g; s/SAMPLE/{params.sample}/g' > {output}"
+
+#############################
+### Download all datasets ###
+#############################
+
+rule download_all:
+    input:
+        genome_ref="genomes/hg38.fa",
+        ref_chr_sizes="genomes/hg38.chrom.sizes",
+        VCaP_chip_seq=expand("reads/chip_seq/VCaP_SRA012454/{SRR}_1.fastq.gz", SRR=["SRR039769","SRR039773","SRR039774","SRR039775"]),
+        VCaP_atac_seq="reads/atac_seq/VCaP/VCaP_reads.bam",
+        PC_atac_seq=expand("reads/atac_seq/tampere_pc/{sample}_reads.bam", sample=config["samples"]),
+        UniBind="UniBind_tfbs/UniBindPWM/.download_done"
+
+rule download_hg38:
+    output:
+        "genomes/hg38.fa"
+    params:
+        hg38_ftp_url = lambda wildcards: config["hg38_ftp_url"]
+    shell:
+        "wget {params.hg38_ftp_url} -O {output}.gz; "
+        "zcat {output}.gz > {output}; rm {output}.gz "
+
+rule download_hg38_chrom_sizes:
+    output:
+        "genomes/hg38.chrom.sizes"
+    params:
+        url=lambda wildcards: config["hg38_chrom_sizes_url"]
+    shell:
+        "wget {params.url} -O {output}"
+
+## Dowload fastq Chip-Seq data from SRA012454
+## https://www.ncbi.nlm.nih.gov/sra/?term=SRA012454.1
+## https://www.ncbi.nlm.nih.gov/Traces/study/?acc=SRP002294&o=acc_s%3Aa
+## e.g. snakemake reads/chip_seq/VCaP_SRA012454/SRR039768_1.fastq.gz
+rule download_fastq_SRA012454:
+    output:
+        "reads/chip_seq/VCaP_SRA012454/{SRR_name}_1.fastq.gz"
+    params:
+        SRR = lambda wildcards: wildcards.SRR_name
+    shell:
+        #"module load compbio/sratoolkit; "
+        "fastq-dump -W -v --gzip --split-files --outdir reads/chip_seq/VCaP_SRA012454/ {params.SRR};"
+
+## TODO link is not available anymore on binf
+## Download ATAC-Seq data from VCaP cell line
+## e.g. snakemake reads/atac_seq/VCaP/VCaP_reads.bam 
+rule download_VCaP_atac_bam:
+    output:
+        bam="reads/atac_seq/VCaP/VCaP_reads.bam",
+        bai="reads/atac_seq/VCaP/VCaP_reads.bai"
+    shell:
+        "wget --user tampere --password prostate "
+            "-O {output.bam} https://binf.rd.tuni.fi/projects/pc_celllines/atac-seq/VCaP.bam; "
+        "wget --user tampere --password prostate " 
+            "-O {output.bai} https://binf.rd.tuni.fi/projects/pc_celllines/atac-seq/VCaP.bam.bai"
+
+## Download Tampere PC clinical tissue samples ATAC-seq data
+## e.g. snakemake reads/atac_seq/tampere_pc/BPH_701_reads.bam
+## e.g. snakemake reads/atac_seq/tampere_pc/PC_17163_reads.bam
+## e.g. snakemake reads/atac_seq/tampere_pc/CRPC_541_reads.bam
+rule download_tampere_pc_atac_bam:
+    output:
+        bam="reads/atac_seq/tampere_pc/{sample}_reads.bam",
+        bai="reads/atac_seq/tampere_pc/{sample}_reads.bai"
+    params:
+        sample=lambda wildcards: wildcards.sample
+    shell:
+        "wget --user tampere --password prostate "
+            "-O {output.bam} https://binf.rd.tuni.fi/projects/tampere_pc/atac-seq/alignments/{params.sample}.bam; "
+        "wget --user tampere --password prostate "
+            "-O {output.bai} https://binf.rd.tuni.fi/projects/tampere_pc/atac-seq/alignments/{params.sample}.bam.bai"
+
+## Download and unzip UniBindPWM TF binding sites
+rule download_UniBindPWM_tfbs:
+    output:
+        "UniBind_tfbs/UniBindPWM/.download_done"
+    params:
+        url=lambda wildcards: config["UniBindPWM_url"] 
+    shell:
+       "wget -O UniBind_tfbs/UniBindPWM/tfbs.tar.gz {params.url}; "
+       "tar xvzf UniBind_tfbs/UniBindPWM/tfbs.tar.gz -C UniBind_tfbs/UniBindPWM; "
+       "rm UniBind_tfbs/UniBindPWM/tfbs.tar.gz; "
+       "touch {output};"
+
+###############################
+### Process downloaded data ###
+###############################
+
+rule process_all_input_data:
+    input:
+        tfbs=expand("UniBind_tfbs/UniBindPWM_merged_by_TF/{TF}.bed", TF=config["TFs"]),
+        chip_seq_vcap_bw=expand("tracks/chip_seq/VCaP_SRA012454/SAMN00011193_{strand}.bw", strand=["pos", "neg"]),
+        atac_seq_vcap_bw=expand("tracks/atac_seq/VCaP/VCaP_{strand}.bw", strand=["pos", "neg"]),
+        atac_seq_pc_bw=expand("tracks/atac_seq/VCaP/{sample}_{strand}.bw", strand=["pos", "neg"], sample=config["samples"]),
+        chip_seq_vcap_training_regions="training_regions/chip_seq/VCaP_SRA012454/SAMN00011193_summits.bed",
+        atac_seq_vcap_training_regions=expand("training_regions/atac_seq/VCaP/VCaP_{TF}_summits.bed", TF=config["TFs"]),
+        atac_seq_pc_training_regions=expand("training_regions/atac_seq/tampere_pc/unified_{TF}_summits.bed", TF=config["TFs"])
+
+## UniBind TF-specific binding sites
+## Make the union of all bed files from a TF's binding sites 
+## e.g. snakemake UniBind_tfbs/UniBindPWM_merged_by_TF/AR.bed
+rule tfbs_bed_union:
+    input:
+        "UniBind_tfbs/UniBindPWM/.download_done"
+    output:
+        "UniBind_tfbs/UniBindPWM_merged_by_TF/{TF}.bed"
+    params:
+        TF=lambda wildcards: wildcards.TF
+    shell:
+        "cat UniBind_tfbs/UniBindPWM/{params.TF}/* | sort -k 1,1 -k2,2n > {output}"
+
+## Reference genome indexing
+rule index_hg38:
+    input:
+        "genomes/hg38.fa"
+    output:
+        "genomes/.bowtie2_index_done"
+    shell:
+        #"module load compbio/bowtie2; "
+        "bowtie2-build -f {input} genomes/hg38; "
+        "touch {output}"
+
+## Generate strand-specific BAM files
+## e.g. snakemake reads/chip_seq/VCaP_SRA012454/SAMN00011196_pos.bam
+## e.g. snakemake reads/atac_seq/VCaP/VCaP_pos.bam
+rule split_bam_strands:
+    input:
+        "reads/{data_type}/{data_source}/{sample}_reads.bam"
+    output:
+        pos="reads/{data_type}/{data_source}/{sample}_pos.bam",
+        neg="reads/{data_type}/{data_source}/{sample}_neg.bam"
+    shell:
+        "samtools view -F 0x10 {input} -b -o {output.pos}; "
+        "samtools view -f 0x10 {input} -b -o {output.neg}"
+
+## Create index for a bam file
+rule index_bam:
+    input:
+        "reads/{data_type}/{data_source}/{bam_name}.bam"
+    output:
+        "reads/{data_type}/{data_source}/{bam_name}.bai"
+    shell:
+        #"samtools index -b {input} {output}"
+        "samtools index {input} {output}"
+
+## Generate the corresponding bigwig file from a BAM file
+## e.g. snakemake tracks/chip_seq/VCaP_SRA012454/SAMN00011193_pos.bw
+## e.g. snakemake tracks/atac_seq/VCaP/VCaP_pos.bw
+## e.g. snakemake tracks/atac_seq/tampere_pc/BPH_701_pos.bw
+rule export_bigwig:
+    input:
+        bam="reads/{data_type}/{data_source}/{bam_name}.bam",
+        bai="reads/{data_type}/{data_source}/{bam_name}.bai"
+    output:
+        "tracks/{data_type}/{data_source}/{bam_name}.bw"
+    shell:
+        "bamCoverage "
+        "--bam {input.bam} "
+        "--outFileName {output} "
+        "--outFileFormat bigwig "
+
+##############################################
+### Process VCaP AR Chip-seq training data ###
+##############################################
+
+## Align VCaP AR Chip-seq data
+## Align fastq reads from a SRA012454 sample against hg38 with bowtie2
+## and generate a sorted bam file with aligned reads only
+## e.g. snakemake reads/chip_seq/VCaP_SRA012454/SAMN00011193_reads.bam
+## e.g. snakemake reads/chip_seq/VCaP_SRA012454/SAMN00011197_reads.bam
+rule align_SRA012454:
+    input:
+        fastq=lambda wildcards: expand("reads/chip_seq/VCaP_SRA012454/{SRR_name}_1.fastq.gz", SRR_name=config["SRA012454"][wildcards.sample]),
+        index="genomes/.bowtie2_index_done"
+    output:
+        "reads/chip_seq/VCaP_SRA012454/{sample}_reads.bam"
+    params:
+        x=lambda wildcards: config["bowtie2_ref_basename"],
+        sample=lambda wildcards: wildcards.sample
+    shell:
+        "U=$(echo \"{input.fastq}\" | sed 's/ /,/'); "
+        "mkdir -p reads/chip_seq/VCaP_SRA012454/bowtie_logs; "
+        "bowtie2 "
+        "--very-sensitive "
+        "--threads 8 "
+        "-x {params.x} "
+        "-U $U "
+        "--no-unal "
+        "2> reads/chip_seq/VCaP_SRA012454/bowtie_logs/{params.sample}.log "
+        "| samtools view -@8 -u -b - "
+        "| samtools sort > {output}"
+
+## Call peaks with emacs2 from VCaP AR Chip-seq BAM files (exp + input)
+## e.g. snakemake peaks/chip_seq/VCaP_SRA012454/SAMN00011193_summits.bed
+rule call_peaks_with_bias_track:
+    input:
+        exp="reads/chip_seq/VCaP_SRA012454/{sample}_reads.bam",
+        bias=lambda wildcards: "reads/chip_seq/VCaP_SRA012454/" + config["chip_input"][wildcards.sample] + "_reads.bam",
+    output:
+        summits="peaks/chip_seq/VCaP_SRA012454/{sample}_summits.bed",
+        narrow="peaks/chip_seq/VCaP_SRA012454/{sample}_peaks.narrowPeak",
+        model="peaks/chip_seq/VCaP_SRA012454/{sample}_model.r",
+        peaks="peaks/chip_seq/VCaP_SRA012454/{sample}_peaks.xls"
+    params:
+        sample=lambda wildcards: wildcards.sample
+    shell:
+        "macs2 callpeak "
+            "--treatment {input.exp} "
+            "--control {input.bias} "
+            "--name {params.sample} "
+            "--outdir peaks/chip_seq/VCaP_SRA012454 "
+            "--gsize hs"
+
+## Define training regions for VCaP AR Chip-seq model
+## Filter the VCaP AR Chip-seq summits excluding non canonical CHRs
+## e.g. snakemake training_regions/chip_seq/VCaP_SRA012454/SAMN00011193_summits.bed
+rule exclude_noncanonical_chr:
+    input:
+        "peaks/chip_seq/VCaP_SRA012454/{sample}_summits.bed"
+    output:
+        "training_regions/chip_seq/VCaP_SRA012454/{sample}_summits.bed"
+    shell:
+        # Exclude non canonical chrs
+        "cat {input} | awk '$1!~/chr.+_/' > {output}"
+        # or, exclude non canonical chrs and filter out weak intensity peaks
+        #"cat {input} | awk '{{if($5>5 && $1!~/chr.+_/){{print $0}}}}' > {output}"
+
+######################################
+### Process ATAC-seq training data ###
+######################################
+
+## Call peaks with emacs2 from BAM files (control track is not used)
+## e.g. snakemake peaks/atac_seq/VCaP/VCaP_summits.bed
+rule call_peaks_without_bias_track:
+    input:
+        exp="reads/atac_seq/{data_source}/{sample}_reads.bam",
+    output:
+        summits="peaks/atac_seq/{data_source}/{sample}_summits.bed",
+        narrow="peaks/atac_seq/{data_source}/{sample}_peaks.narrowPeak",
+        model="peaks/atac_seq/{data_source}/{sample}_model.r",
+        peaks="peaks/atac_seq/{data_source}/{sample}_peaks.xls"
+    params:
+        sample=lambda wildcards: wildcards.sample,
+        source=lambda wildcards: wildcards.data_source
+    shell:
+        "macs2 callpeak "
+        "--treatment {input.exp} "
+        "--name {params.sample} "
+        "--outdir peaks/atac_seq/{params.source} "
+        "--gsize hs"
+
+## Select input regions intersecting unified ATAC-Seq summits,
+## extended by 50 bp in both directions, with UniBind tfbs 
+## e.g. snakemake training_regions/atac_seq/VCaP/VCaP_AR_summits.bed
+## e.g. snakemake training_regions/atac_seq/tampere_pc/unified_AR_summits.bed
+rule intersect_UniBind_unified_tfbs:
+    input:
+        summits="peaks/atac_seq/{data_source}/{sample}_summits.bed",
+        tfbs="UniBind_tfbs/UniBindPWM_merged_by_TF/{TF}.bed",
+        chr_sizes="genomes/hg38.chrom.sizes"
+    output:
+        "training_regions/atac_seq/{data_source}/{sample}_{TF}_summits.bed"
+    shell:
+        "bedtools slop -i {input.summits} -g {input.chr_sizes} -b 50 > {output}.tmp; "
+        "bedtools intersect -wa -a {output}.tmp -b {input.tfbs} | uniq "
+        "| awk '{{print $1\"\t\"$2+50\"\t\"$3-50}}' > {output}; "
+        "rm {output}.tmp"
+
+###########################################
+### Process Tampere PC training regions ###
+###########################################
+
+## Prepare atac summits from tampere pc clinical samples (unified peaks)
+rule process_tampere_pc_atac_peaks:
+    input:
+        "unified_peaks_annotated.csv"
+    output:
+        "peaks/atac_seq/tampere_pc/unified_summits.bed"
+    shell:
+        "cat {input} | sed '1d' | awk '{{print $1\"\t\"$2+250\"\t\"$3-249}}' > {output}"
+
+############################
+### BPNET model training ###
+############################
+
+rule train_all:
+    input:
+        chip_seq_VCaP="models/chip_seq/VCaP_SRA012454/SAMN00011193_BPNET_model/seq_model.pkl",
+        atac_seq_VCaP=expand("models/atac_seq/VCaP/VCaP_{TF}_BPNET_model/seq_model.pkl", TF=config["TFs"]),
+        atac_seq_PC=expand("models/atac_seq/tampere_pc/{sample}_{TF}_BPNET_model/seq_model.pkl", TF=config["TFs"], sample=config["samples"])
+
+rule train_chip_seq_VCap:
+    input:
+        "models/chip_seq/VCaP_SRA012454/SAMN00011193_BPNET_model/seq_model.pkl"
+
+rule train_atac_seq_VCap:
+    input:
+        expand("models/atac_seq/VCaP/VCaP_{TF}_BPNET_model/seq_model.pkl", TF=config["TFs"])
+
+rule train_atac_seq_PC:
+    input:
+        expand("models/atac_seq/tampere_pc/{sample}_{TF}_BPNET_model/seq_model.pkl", TF=config["TFs"], sample=config["samples"])
+
+## Train VCaP AR Chip-seq BPNET SeqModel using gin files to control
+## hyper-parameters and data specifications
+## e.g. snakemake models/chip_seq/VCaP_SRA012454/SAMN00011193_BPNET_model/seq_model.pkl
+rule bpnet_train_chip_seq_model:
+    input:
+        summits="training_regions/chip_seq/{data_source}/{sample}_summits.bed",
+        bw=lambda wildcards: expand("tracks/chip_seq/{data_source}/{sample}_{strand}.bw", data_source=wildcards.data_source, sample=wildcards.sample, strand=["pos", "neg"]),
+        bw_bias=lambda wildcards: expand("tracks/chip_seq/{data_source}/{bias_track}_{strand}.bw", data_source=wildcards.data_source, sample=wildcards.sample, bias_track=config["chip_input"][wildcards.sample], strand=["pos", "neg"]),
+        gin="model_config/chip_seq/{data_source}/{sample}.gin",
+        dataspec="model_dataspec/chip_seq/{data_source}/{sample}.yml"
+    output:
+        "models/chip_seq/{data_source}/{sample}_BPNET_model/seq_model.pkl"
+    params:
+        model_dir=lambda wildcards: f"models/chip_seq/{wildcards.data_source}/{wildcards.sample}_BPNET_model",
+        workers=lambda wildards: config["workers"]
+    shell:
+        "python src/BPNET_train.py"
+        " --dataspec {input.dataspec}"
+        " --model_dir {params.model_dir}"
+        " --configgin {input.gin}"
+        " --workers {params.workers}"
+
+## Train VCaP ATAC-seq BPNET SeqModels using gin files to control
+## hyper-parameters and data specifications
+## e.g. snakemake models/atac_seq/VCaP/VCaP_AR_BPNET_model/seq_model.pkl
+rule bpnet_train_atac_seq_model:
+    input:
+        summits="training_regions/atac_seq/VCaP/VCaP_{TF}_summits.bed",
+        bw=lambda wildcards: expand("tracks/atac_seq/VCaP/VCaP_{strand}.bw", strand=["pos", "neg"]),
+        gin="model_config/atac_seq/VCaP/VCaP_{TF}.gin",
+        dataspec="model_dataspec/atac_seq/VCaP/VCaP_{TF}.yml"
+    output:
+        "models/atac_seq/VCaP/VCaP_{TF}_BPNET_model/seq_model.pkl"
+    params:
+        model_dir=lambda wildcards: f"models/atac_seq/VCaP/VCaP_{wildcards.TF}_BPNET_model",
+        workers=lambda wildards: config["workers"]
+    shell:
+        "python src/BPNET_train.py"
+        " --dataspec {input.dataspec}"
+        " --model_dir {params.model_dir}"
+        " --configgin {input.gin}"
+        " --workers {params.workers}"
+
+## Train clinical tissue samples ATAC-seq BPNET SeqModels using gin files to
+## control hyper-parameters and data specifications
+## e.g. snakemake models/atac_seq/tampere_pc/BPH_701_AR_BPNET_model/seq_model.pkl
+rule bpnet_train_clinical_atac_seq_model:
+    input:
+        summits="training_regions/atac_seq/tampere_pc/unified_{TF}_summits.bed",
+        bw=lambda wildcards: expand("tracks/atac_seq/tampere_pc/{sample}_{strand}.bw", sample=wildcards.sample, strand=["pos", "neg"]),
+        gin="model_config/atac_seq/tampere_pc/{sample}_{TF}.gin",
+        dataspec="model_dataspec/atac_seq/tampere_pc/{sample}_{TF}.yml"
+    output:
+        "models/atac_seq/tampere_pc/{sample}_{TF}_BPNET_model/seq_model.pkl"
+    params:
+        model_dir=lambda wildcards: f"models/atac_seq/tampere_pc/{wildcards.sample}_{wildcards.TF}_BPNET_model",
+        workers=lambda wildards: config["workers"]
+    shell:
+        "python src/BPNET_train.py"
+        " --dataspec {input.dataspec}"
+        " --model_dir {params.model_dir}"
+        " --configgin {input.gin}"
+        " --workers {params.workers}"
+
+###################################
+### Compute Contribution Scores ###
+###################################
+
+## Compute contribution scores from a trained model
+## and null contribution scores after shuffling sequence
+## e.g. sankemake models/chip_seq/VCaP_SRA012454/SAMN00011193_BPNET_model/contrib.deeplift.h5
+## e.g. sankemake models/atac_seq/VCaP/VCaP_AR_BPNET_model/contrib.deeplift.h5
+## e.g. sankemake models/atac_seq/tampere_pc/BPH_701_AR_BPNET_model/contrib.deeplift.h5
+rule compute_contrib_scores:
+    input:
+        "models/{data_type}/{data_source}/{model_dir}/seq_model.pkl"
+    output:
+        contrib="models/{data_type}/{data_source}/{model_dir}/contrib.deeplift.h5",
+        nll_contrib="models/{data_type}/{data_source}/{model_dir}/contrib.deeplift.null.h5"
+    params:
+        model_dir=lambda wildcards: f'models/{wildcards.data_type}/{wildcards.data_source}/{wildcards.model_dir}'
+    shell:
+        "CURRENT_MODEL_DIR=$(readlink -f {params.model_dir}/seq_model.pkl | rev | cut -d '/' -f2 | rev); "
+        "rm {params.model_dir}/seq_model.pkl; "
+        "cp -fr {params.model_dir}/${{CURRENT_MODEL_DIR}}/* {params.model_dir}; "
+        "bpnet contrib {params.model_dir} --method=deeplift --overwrite --max-regions 5000 --contrib-wildcard='*/profile/wn' {output.contrib}; "
+        "bpnet contrib {params.model_dir} --method=deeplift --overwrite --shuffle-seq --max-regions 5000 --contrib-wildcard='*/profile/wn' {output.nll_contrib}"
+
+######################
+### Run TF-MoDISCo ###
+######################
+
+rule all_motif_discovery:
+    input:
+        chip_seq_VCaP="models/chip_seq/VCaP_SRA012454/SAMN00011193_BPNET_model/modisco/AR/modisco.html",
+        atac_seq_VCaP=expand("models/atac_seq/VCaP/VCaP_{TF}_BPNET_model/modisco/{TF}/modisco.html", TF=config["TFs"]),
+        atac_seq_PC=expand("models/atac_seq/tampere_pc/{sample}_{TF}_BPNET_model/modisco/{TF}/modisco.html", TF=config["TFs"], sample=config["samples"])
+
+rule chip_seq_VCaP_motif_discovery:
+    input:
+        "models/chip_seq/VCaP_SRA012454/SAMN00011193_BPNET_model/modisco/AR/modisco.html"
+
+rule atac_seq_VCaP_motif_discovery:
+    input:
+        expand("snakemake models/atac_seq/VCaP/VCaP_{TF}_BPNET_model/modisco/{TF}/modisco.html", TF=config["TFs"])
+
+rule atac_seq_PC_motif_discovery:
+    input:
+        expand("models/atac_seq/tampere_pc/{sample}_{TF}_BPNET_model/modisco/{TF}/modisco.html", TF=config["TFs"], sample=config["samples"])
+
+## Run the complete modisco workflow on VCaP AR Chip-seq model
+## e.g. snakemake models/chip_seq/VCaP_SRA012454/SAMN00011193_BPNET_model/modisco/AR/modisco.html
+rule run_modisco_chip_seq:
+    input:
+        contrib="models/chip_seq/{data_source}/{sample}_BPNET_model/contrib.deeplift.h5",
+        nll_contrib="models/chip_seq/{data_source}/{sample}_BPNET_model/contrib.deeplift.null.h5"
+    output:
+        "models/chip_seq/{data_source}/{sample}_BPNET_model/modisco/AR/modisco.html"
+    params:
+        model_dir=lambda wildcards: f'models/chip_seq/{wildcards.data_source}/{wildcards.sample}_BPNET_model'
+    shell:
+        "bpnet modisco-run {input.contrib} --null-contrib-file={input.nll_contrib} --override='TfModiscoWorkflow.min_metacluster_size = 1000' --contrib-wildcard=AR/profile/wn --only-task-regions --premade=modisco-50k {params.model_dir}/modisco/AR/ --overwrite"
+        #"bpnet modisco-run {input.contrib} --null-contrib-file={input.nll_contrib} --contrib-wildcard=AR/profile/wn --only-task-regions --premade=modisco-50k {params.model_dir}/modisco/AR/ --overwrite"
+
+## Run the complete modisco workflow on ATAC-seq models
+## e.g. snakemake models/atac_seq/VCaP/VCaP_AR_BPNET_model/modisco/AR/modisco.html
+## e.g  snakemake models/atac_seq/tampere_pc/BPH_701_AR_BPNET_model/modisco/AR/modisco.html
+rule run_modisco_atac_seq:
+    input:
+        contrib="models/atac_seq/{data_source}/{sample}_{TF}_BPNET_model/contrib.deeplift.h5",
+        nll_contrib="models/atac_seq/{data_source}/{sample}_{TF}_BPNET_model/contrib.deeplift.null.h5"
+    output:
+        "models/atac_seq/{data_source}/{sample}_{TF}_BPNET_model/modisco/{TF}/modisco.html"
+    params:
+        task=lambda wildcards: wildcards.TF,
+        model_dir=lambda wildcards: f'models/atac_seq/{wildcards.data_source}/{wildcards.sample}_{wildcards.TF}_BPNET_model'
+    shell:
+        "bpnet modisco-run {input.contrib} --null-contrib-file={input.nll_contrib} --override='TfModiscoWorkflow.min_metacluster_size = 1000' --contrib-wildcard={params.task}/profile/wn --only-task-regions --premade=modisco-50k {params.model_dir}/modisco/{params.task}/ --overwrite"
+        #"bpnet modisco-run {input.contrib} --null-contrib-file={input.nll_contrib} --contrib-wildcard={params.task}/profile/wn --only-task-regions --premade=modisco-50k {params.model_dir}/modisco/{params.task}/ --overwrite"
+
+################################
+### Plot PFMs sequence logos ###
+################################
+
+## Plot the sequence logos of the patterns from modisco results for
+## the VCaP AR Chip-seq model
+## e.g. snakemake models/chip_seq/VCaP_SRA012454/SAMN00011193_BPNET_model/modisco/modisco_plots/all_patterns.png
+rule plot_modisco_patterns_chip_seq:
+    input:
+        "models/chip_seq/{data_source}/{sample}_BPNET_model/modisco/AR/modisco.html"
+    output:
+        "models/chip_seq/{data_source}/{sample}_BPNET_model/modisco/modisco_plots/all_patterns.png"
+    params:
+        model_dir=lambda wildcards: f'models/chip_seq/{wildcards.data_source}/{wildcards.sample}_BPNET_model'
+    shell:
+        "python src/BPNET_modisco_visualize.py --model_dir {params.model_dir} --task AR"
+
+## Plot the sequence logos of the patterns from modisco results for
+## the ATAC-seq models
+## e.g. snakemake models/atac_seq/VCaP/VCaP_AR_BPNET_model/modisco/modisco_plots/all_patterns.png
+## e.g  snakemake models/atac_seq/tampere_pc/BPH_701_AR_BPNET_model/modisco/modisco_plots/all_patterns.png
+rule plot_modisco_patterns_atac_seq:
+    input:
+        "models/atac_seq/{data_source}/{sample}_{TF}_BPNET_model/modisco/{TF}/modisco.html"
+    output:
+        "models/atac_seq/{data_source}/{sample}_{TF}_BPNET_model/modisco/modisco_plots/all_patterns.png"
+    params:
+        model_dir=lambda wildcards: f'models/atac_seq/{wildcards.data_source}/{wildcards.sample}_{wildcards.TF}_BPNET_model',
+        task=lambda wildcards: wildcards.TF
+    shell:
+        "python src/BPNET_modisco_visualize.py --model_dir {params.model_dir} --task {params.task}"
+
+##########################################
+### Analyze discovered sequence motifs ###
+##########################################
+
+rule chip_seq_VCaP_tomtom_report:
+    input:
+        "models/chip_seq/VCaP_SRA012454/SAMN00011193_BPNET_model/modisco/AR/tomtom_report.md"
+
+rule atac_seq_VCaP_tomtom_reports:
+    input:
+        expand("models/atac_seq/VCaP/VCaP_{TF}_BPNET_model/modisco/{TF}/tomtom_report.md", TF=config["TFs"])
+
+rule atac_seq_PC_tomtom_reports:
+    input:
+        expand("models/atac_seq/tampere_pc/{sample}_{TF}_BPNET_model/modisco/{TF}/tomtom_report.md", TF=config["TFs"], sample=config["samples"])
+
+## Run tomtom to rank hocomoco PWMs based on similarity with 
+## resulting modisco patterns for a AR Chip-seq BPNET model
+## e.g. snakemake models/chip_seq/VCaP_SRA012454/SAMN00011193_BPNET_model/modisco/AR/tomtom_results.txt
+rule run_tomtom_chip_seq:
+    input:
+        "models/chip_seq/{data_source}/{sample}_BPNET_model/modisco/AR/modisco.html"
+    output:
+        "models/chip_seq/{data_source}/{sample}_BPNET_model/modisco/AR/tomtom_results.txt"
+    params:
+        model_dir=lambda wildcards: f'models/chip_seq/{wildcards.data_source}/{wildcards.sample}_BPNET_model'
+    shell:
+        "python src/BPNET_run_tomtom.py --model_dir {params.model_dir} --task AR; "
+        "for clust in $(ls {params.model_dir}/modisco/AR/tomtom); do "
+            "echo -e \"---------------------------\n$clust\"; echo; "
+            "cat {params.model_dir}/modisco/AR/tomtom/$clust | sed '1d' "
+            "| awk '{{split($2,a,\"_\"); printf(a[1]\" (q=\"$5\"), \")}}'; "
+            "echo; echo; "
+        "done > {output}"
+
+## Run tomtom to rank hocomoco PWMs based on similarity with 
+## resulting modisco patterns for a ATAC-seq BPNET model
+## e.g. snakemake models/atac_seq/VCaP/VCaP_AR_BPNET_model/modisco/AR/tomtom_results.txt
+## e.g. snakemake models/atac_seq/tampere_pc/BPH_701_AR_BPNET_model/modisco/AR/tomtom_results.txt
+rule run_tomtom_atac_seq:
+    input:
+        "models/atac_seq/{data_source}/{sample}_{TF}_BPNET_model/modisco/{TF}/modisco.html"
+    output:
+        "models/atac_seq/{data_source}/{sample}_{TF}_BPNET_model/modisco/{TF}/tomtom_results.txt"
+    params:
+        task=lambda wildcards: wildcards.TF,
+        model_dir=lambda wildcards: f'models/atac_seq/{wildcards.data_source}/{wildcards.sample}_{wildcards.TF}_BPNET_model'
+    shell:
+        "python src/BPNET_run_tomtom.py --model_dir {params.model_dir} --task {params.task}; "
+        "for clust in $(ls {params.model_dir}/modisco/{params.task}/tomtom); do "
+            "echo -e \"---------------------------\n$clust\"; echo; "
+            "cat {params.model_dir}/modisco/{params.task}/tomtom/$clust | sed '1d' "
+            "| awk '{{split($2,a,\"_\"); printf(a[1]\" (q=\"$5\"), \")}}'; "
+            "echo; echo; "
+        "done > {output}"
+
+## Generate report of discovered patterns for a given model
+## Sequence logos and tomtom matches with q values are listed
+## e.g. snakemake models/chip_seq/VCaP_SRA012454/SAMN00011193_BPNET_model/modisco/AR/tomtom_report.md
+## e.g. snakemake models/atac_seq/VCaP/VCaP_AR_BPNET_model/modisco/AR/tomtom_report.md
+## e.g. snakemake models/atac_seq/tampere_pc/BPH_701_AR_BPNET_model/modisco/AR/tomtom_report.md
+rule generate_report_of_patterns:
+    input:
+        tomtom="models/{data_type}/{data_source}/{model_name}_BPNET_model/modisco/{task}/tomtom_results.txt",
+        plot="models/{data_type}/{data_source}/{model_name}_BPNET_model/modisco/modisco_plots/all_patterns.png" 
+    output:
+        "models/{data_type}/{data_source}/{model_name}_BPNET_model/modisco/{task}/tomtom_report.md",
+    params:
+        model_dir=lambda wildcards: f'models/{wildcards.data_type}/{wildcards.data_source}/{wildcards.model_name}_BPNET_model',
+        task=lambda wildcards: wildcards.task,
+        model_name=lambda wildcards: wildcards.model_name,
+    shell:
+        "cat tomtom_report_template.md | sed \"s#MODEL_NAME#{params.model_name}#g; "
+        "s#MODEL_DIR#{params.model_dir}#g;\" > {output}.tmp; "
+        "cat {output}.tmp {input.tomtom} > {output}; rm {output}.tmp; "
+        "cp {output} {params.model_dir}/tomtom_report.md; "
+        "sed -i \"s#PATTERNS#modisco/modisco_plots/all_patterns.png#g\" {params.model_dir}/tomtom_report.md"
