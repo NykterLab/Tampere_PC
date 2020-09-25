@@ -1,3 +1,39 @@
+workers: 8
+
+hg38_ftp_url: https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz
+
+hg38_chrom_sizes_url: https://hgdownload.cse.ucsc.edu/goldenpath/hg38/bigZips/hg38.chrom.sizes
+
+bowtie2_ref_basename: genomes/hg38
+
+UniBindPWM_url: https://unibind.uio.no/static/data/bulk/pwm_tfbs_per_tf.tar.gz
+
+SRA012454:
+    SAMN00011190: SRR039766
+    SAMN00011191: 
+        - SRR039767
+        - SRR039777
+    SAMN00011192: SRR039768
+    SAMN00011193: 
+        - SRR039769
+        - SRR039774
+    SAMN00011194: SRR039770
+    SAMN00011195: SRR039771
+    SAMN00011196: 
+        - SRR039772
+        - SRR039776
+    SAMN00011197:
+        - SRR039773
+        - SRR039775
+
+chip_input:
+    SAMN00011190: SAMN00011196
+    SAMN00011191: SAMN00011196
+    SAMN00011192: SAMN00011197
+    SAMN00011193: SAMN00011197
+    SAMN00011194: SAMN00011196
+    SAMN00011195: SAMN00011196
+
 TFs:
     - AR
     - FOXA1

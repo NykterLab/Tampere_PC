@@ -1,0 +1,14 @@
+fasta_file: genomes/hg38.fa
+task_specs: 
+  AR:
+    tracks:
+      - tracks/chip_seq/VCaP_SRA012454/SAMN00011193_pos.bw
+      - tracks/chip_seq/VCaP_SRA012454/SAMN00011193_neg.bw
+    peaks: training_regions/chip_seq/VCaP_SRA012454/SAMN00011193_summits.bed
+bias_specs:
+  input:
+    tracks: 
+      - tracks/chip_seq/VCaP_SRA012454/SAMN00011197_pos.bw
+      - tracks/chip_seq/VCaP_SRA012454/SAMN00011197_neg.bw
+    tasks: 
+      - AR

@@ -105,9 +105,9 @@ MovingAverages.window_sizes = [1, 50]
 # Parameters for PeakPredictionProfileMetric:
 # ==============================================================================
 PeakPredictionProfileMetric.binsizes = [1, 2, 5, 10, 50]
-PeakPredictionProfileMetric.neg_max_threshold = 0.005
-PeakPredictionProfileMetric.pos_min_threshold = 0.015
-PeakPredictionProfileMetric.required_min_pos_counts = 2.5
+PeakPredictionProfileMetric.neg_max_threshold = 0.001
+PeakPredictionProfileMetric.pos_min_threshold = 0.002
+PeakPredictionProfileMetric.required_min_pos_counts = 0.0
 
 # Parameters for ProfileHead:
 # ==============================================================================

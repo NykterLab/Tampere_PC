@@ -1,0 +1,7 @@
+fasta_file: genomes/hg38.fa
+task_specs: 
+  AR:
+    tracks:
+      - tracks/atac_seq/VCaP/VCaP_pos.bw
+      - tracks/atac_seq/VCaP/VCaP_neg.bw
+    peaks: training_regions/atac_seq/VCaP/VCaP_AR_summits.bed
