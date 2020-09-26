@@ -114,7 +114,6 @@ rule download_fastq_SRA012454:
         #"module load compbio/sratoolkit; "
         "fastq-dump -W -v --gzip --split-files --outdir reads/chip_seq/VCaP_SRA012454/ {params.SRR};"
 
-## TODO link is not available anymore on binf
 ## Download ATAC-Seq data from VCaP cell line
 ## e.g. snakemake reads/atac_seq/VCaP/VCaP_reads.bam 
 rule download_VCaP_atac_bam:
@@ -123,9 +122,9 @@ rule download_VCaP_atac_bam:
         bai="reads/atac_seq/VCaP/VCaP_reads.bai"
     shell:
         "wget --user tampere --password prostate "
-            "-O {output.bam} https://binf.rd.tuni.fi/projects/pc_celllines/atac-seq/VCaP.bam; "
+            "-O {output.bam} https://binf.rd.tuni.fi/projects/pc_celllines/atac-seq/VCap.bam; "
         "wget --user tampere --password prostate " 
-            "-O {output.bai} https://binf.rd.tuni.fi/projects/pc_celllines/atac-seq/VCaP.bam.bai"
+            "-O {output.bai} https://binf.rd.tuni.fi/projects/pc_celllines/atac-seq/VCap.bam.bai"
 
 ## Download Tampere PC clinical tissue samples ATAC-seq data
 ## e.g. snakemake reads/atac_seq/tampere_pc/BPH_701_reads.bam
@@ -164,7 +163,7 @@ rule process_all_input_data:
         tfbs=expand("UniBind_tfbs/UniBindPWM_merged_by_TF/{TF}.bed", TF=config["TFs"]),
         chip_seq_vcap_bw=expand("tracks/chip_seq/VCaP_SRA012454/SAMN00011193_{strand}.bw", strand=["pos", "neg"]),
         atac_seq_vcap_bw=expand("tracks/atac_seq/VCaP/VCaP_{strand}.bw", strand=["pos", "neg"]),
-        atac_seq_pc_bw=expand("tracks/atac_seq/VCaP/{sample}_{strand}.bw", strand=["pos", "neg"], sample=config["samples"]),
+        atac_seq_pc_bw=expand("tracks/atac_seq/tampere_pc/{sample}_{strand}.bw", strand=["pos", "neg"], sample=config["samples"]),
         chip_seq_vcap_training_regions="training_regions/chip_seq/VCaP_SRA012454/SAMN00011193_summits.bed",
         atac_seq_vcap_training_regions=expand("training_regions/atac_seq/VCaP/VCaP_{TF}_summits.bed", TF=config["TFs"]),
         atac_seq_pc_training_regions=expand("training_regions/atac_seq/tampere_pc/unified_{TF}_summits.bed", TF=config["TFs"])
@@ -478,7 +477,7 @@ rule chip_seq_VCaP_motif_discovery:
 
 rule atac_seq_VCaP_motif_discovery:
     input:
-        expand("snakemake models/atac_seq/VCaP/VCaP_{TF}_BPNET_model/modisco/{TF}/modisco.html", TF=config["TFs"])
+        expand("models/atac_seq/VCaP/VCaP_{TF}_BPNET_model/modisco/{TF}/modisco.html", TF=config["TFs"])
 
 rule atac_seq_PC_motif_discovery:
     input:
